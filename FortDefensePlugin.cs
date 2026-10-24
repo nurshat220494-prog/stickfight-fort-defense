@@ -206,6 +206,17 @@ namespace StickFightFortDefense
             Logger.LogInfo("Fort Defense 0.9.1 Awake entered; background simulation enabled.");
             try
             {
+                BepInEx.Configuration.ConfigEntry<string> abilityButton = Config.Bind<string>("Controls", "AbilityButton", "Both",
+                    "Controller button that fires the color ability: R1, Triangle or Both. Holding Up and tapping Block always works too.");
+                abilityButtonMode = abilityButton.Value == null ? "Both" : abilityButton.Value.Trim();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("Could not read the AbilityButton setting; using Both: " + ex.GetType().Name);
+            }
+            Logger.LogInfo("Controller ability button: " + abilityButtonMode + " (R1 / Triangle). Up + Block also works.");
+            try
+            {
                 InstallEnemyAIPatches();
             }
             catch (Exception ex)
@@ -332,6 +343,7 @@ namespace StickFightFortDefense
 
             UpdateColorStation();
             SyncColorMenuSelection();
+            UpdateControllerMenuInput();
             if (colorPanel != null && colorPanel.gameObject.activeSelf && Input.GetKeyDown(KeyCode.Escape))
             {
                 CloseColorMenu();
@@ -472,6 +484,8 @@ namespace StickFightFortDefense
             }
             if (!moved) return;
             current.Use();
+            // The same key press may already have been handled through the player's gamepad actions.
+            if (menuMoveFrame == Time.frameCount) return;
             int next = row * 4 + column;
             if (next != colorMenuSelection)
             {
@@ -480,6 +494,106 @@ namespace StickFightFortDefense
                 if (EventSystem.current != null && colorOptionButtons[next] != null)
                     EventSystem.current.SetSelectedGameObject(colorOptionButtons[next].gameObject);
                 Logger.LogInfo("Color picker keyboard selection moved to option " + (next + 1) + ".");
+            }
+        }
+
+        // ---- Gamepad navigation for the color picker and the perk choice ----
+        // Both menus used to read only the keyboard, so a player on a controller could
+        // open the color picker but not move in it, and could not choose a perk at all.
+        private int menuMoveFrame = -1;
+        private int menuOpenFrame = -1;
+        private float perkShownAt;
+        private int perkHighlight;
+        private readonly List<Button> perkButtons = new List<Button>();
+
+        private static int NextColorSelection(int selection, int count, int dx, int dy)
+        {
+            int rowCount = (count + 3) / 4;
+            int row = selection / 4;
+            int column = selection % 4;
+            int rowItems = Math.Min(4, count - row * 4);
+            if (dx < 0) column = (column + rowItems - 1) % rowItems;
+            else if (dx > 0) column = (column + 1) % rowItems;
+            if (dy < 0)
+            {
+                row = (row + rowCount - 1) % rowCount;
+                column = Math.Min(column, Math.Min(4, count - row * 4) - 1);
+            }
+            else if (dy > 0)
+            {
+                row = (row + 1) % rowCount;
+                column = Math.Min(column, Math.Min(4, count - row * 4) - 1);
+            }
+            return row * 4 + column;
+        }
+
+        private static bool ReadMenuDirection(CharacterActions actions, out int dx, out int dy)
+        {
+            dx = 0;
+            dy = 0;
+            if (actions == null) return false;
+            if (IsActionPressed(actions, AbilityLeftField, "WasPressed")) dx = -1;
+            else if (IsActionPressed(actions, AbilityRightField, "WasPressed")) dx = 1;
+            if (IsActionPressed(actions, AbilityUpField, "WasPressed")) dy = -1;
+            else if (IsActionPressed(actions, AbilityDownField, "WasPressed")) dy = 1;
+            return dx != 0 || dy != 0;
+        }
+
+        private void RefreshPerkHighlight()
+        {
+            for (int i = 0; i < perkButtons.Count; i++)
+            {
+                Button button = perkButtons[i];
+                Image image = button == null ? null : button.targetGraphic as Image;
+                if (image != null)
+                    image.color = i == perkHighlight ? new Color(0.9f, 0.62f, 0.08f, 1f) : new Color(0.09f, 0.32f, 0.43f, 1f);
+            }
+        }
+
+        private void UpdateControllerMenuInput()
+        {
+            if (System.Object.ReferenceEquals(PlayerActionsField, null)) return;
+            if (IsColorMenuOpen && colorMenuPlayer != null)
+            {
+                // Only the player who opened the picker drives it; the opening press is skipped.
+                if (Time.frameCount == menuOpenFrame) return;
+                CharacterActions actions = PlayerActionsField.GetValue(colorMenuPlayer) as CharacterActions;
+                int dx;
+                int dy;
+                if (ReadMenuDirection(actions, out dx, out dy))
+                {
+                    menuMoveFrame = Time.frameCount;
+                    int next = NextColorSelection(colorMenuSelection, colorOptionButtons.Length, dx, dy);
+                    if (next != colorMenuSelection)
+                    {
+                        colorMenuSelection = next;
+                        UpdateColorMenuDescription();
+                        if (EventSystem.current != null && colorOptionButtons[next] != null)
+                            EventSystem.current.SetSelectedGameObject(colorOptionButtons[next].gameObject);
+                        Logger.LogInfo("Color picker gamepad selection moved to option " + (next + 1) + ".");
+                    }
+                }
+                return;
+            }
+            if (perkSelectionActive && activePerkOptionCount > 0 && activePerkPlayerIndex < pendingPerkPlayers.Count)
+            {
+                Controller perkPlayer = pendingPerkPlayers[activePerkPlayerIndex];
+                CharacterActions actions = perkPlayer == null ? null : PlayerActionsField.GetValue(perkPlayer) as CharacterActions;
+                if (actions == null) return;
+                int dx;
+                int dy;
+                if (ReadMenuDirection(actions, out dx, out dy))
+                {
+                    int step = dx != 0 ? dx : dy;
+                    perkHighlight = (perkHighlight + step + activePerkOptionCount) % activePerkOptionCount;
+                    RefreshPerkHighlight();
+                }
+                // Short grace period so a button pressed during the last fight does not pick a perk by accident.
+                else if (Time.unscaledTime - perkShownAt > 0.6f && IsActionPressed(actions, AbilityBlockField, "WasPressed"))
+                {
+                    Logger.LogInfo("Player " + (perkPlayer.playerID + 1) + " confirmed perk option " + (perkHighlight + 1) + " with the gamepad.");
+                    ChoosePerk(perkHighlight);
+                }
             }
         }
 
@@ -1021,14 +1135,19 @@ namespace StickFightFortDefense
                 "Закалка — на 10% меньше входящего урона",
                 "Полевой медик — лечение 15 HP после волн"
             };
-            perkPrompt.text = "Волна " + currentLevelNumber + " пройдена. Игрок " + (player.playerID + 1) + ", выбери перк (1–3):";
+            perkPrompt.text = "Волна " + currentLevelNumber + " пройдена. Игрок " + (player.playerID + 1) +
+                ", выбери перк (клавиши 1–3 / мышь, на геймпаде — D-pad или стик и кнопка Block):";
             for (int i = perkOptionsContainer.childCount - 1; i >= 0; i--) Destroy(perkOptionsContainer.GetChild(i).gameObject);
+            perkButtons.Clear();
             for (int option = 0; option < activePerkOptionCount; option++)
             {
                 int capturedOption = option;
-                CreateButton(perkOptionsContainer, (option + 1) + ". " + names[activePerkOffers[option]],
-                    new Vector2(18f, -18f - option * 74f), new Vector2(704f, 60f), delegate { ChoosePerk(capturedOption); });
+                perkButtons.Add(CreateButton(perkOptionsContainer, (option + 1) + ". " + names[activePerkOffers[option]],
+                    new Vector2(18f, -18f - option * 74f), new Vector2(704f, 60f), delegate { ChoosePerk(capturedOption); }));
             }
+            perkHighlight = 0;
+            perkShownAt = Time.unscaledTime;
+            RefreshPerkHighlight();
         }
 
         private void ChoosePerk(int option)
@@ -1451,9 +1570,10 @@ namespace StickFightFortDefense
                 {
                     continue;
                 }
-                // Hold Up and tap Block to activate a color ability. The native block
-                // still works, while each local controller gets its own input action.
-                if (!IsActionPressed(actions, AbilityBlockField, "WasPressed") || !IsActionPressed(actions, AbilityUpField, "IsPressed"))
+                // One button (R1 / Triangle) fires the ability. Holding Up and tapping Block
+                // still works as before, and each local controller reads only its own input.
+                bool comboPressed = IsActionPressed(actions, AbilityBlockField, "WasPressed") && IsActionPressed(actions, AbilityUpField, "IsPressed");
+                if (!comboPressed && !WasAbilityButtonPressed(actions))
                 {
                     continue;
                 }
@@ -1485,6 +1605,58 @@ namespace StickFightFortDefense
                 return;
             }
             ActivateSpecificColorAbility(player, info, ability);
+        }
+
+        private string abilityButtonMode = "Both";
+        private bool loggedAbilityDevice;
+
+        private static object GetMemberValue(object target, string name)
+        {
+            if (target == null) return null;
+            try
+            {
+                Type type = target.GetType();
+                PropertyInfo property = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (!System.Object.ReferenceEquals(property, null)) return property.GetValue(target, null);
+                FieldInfo field = type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (!System.Object.ReferenceEquals(field, null)) return field.GetValue(target);
+            }
+            catch (Exception)
+            {
+            }
+            return null;
+        }
+
+        private static bool ControlWasPressed(object control)
+        {
+            object value = GetMemberValue(control, "WasPressed");
+            return value is bool && (bool)value;
+        }
+
+        // One-button ability: R1 (right bumper) and/or Triangle (top face button) on the
+        // player's own gamepad, read through the game's InControl device so each local
+        // player only triggers their own ability.
+        private bool WasAbilityButtonPressed(CharacterActions actions)
+        {
+            if (actions == null) return false;
+            object device = GetMemberValue(actions, "Device");
+            if (device == null) device = GetMemberValue(actions, "device");
+            if (device == null) return false;
+            object r1 = GetMemberValue(device, "RightBumper");
+            object triangle = GetMemberValue(device, "Action4");
+            if (!loggedAbilityDevice)
+            {
+                loggedAbilityDevice = true;
+                Logger.LogInfo("Ability button device " + device.GetType().Name + ": R1 control " +
+                    (r1 == null ? "missing" : "found") + ", Triangle control " + (triangle == null ? "missing" : "found") + ".");
+            }
+            string mode = abilityButtonMode == null ? "Both" : abilityButtonMode;
+            bool both = mode.IndexOf("Both", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool allowR1 = both || mode.IndexOf("R1", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                mode.IndexOf("RB", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool allowTriangle = both || mode.IndexOf("Triangle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                mode.IndexOf("Y", StringComparison.OrdinalIgnoreCase) >= 0;
+            return (allowR1 && ControlWasPressed(r1)) || (allowTriangle && ControlWasPressed(triangle));
         }
 
         private static bool IsActionPressed(CharacterActions actions, FieldInfo actionField, string propertyName)
@@ -1685,7 +1857,7 @@ namespace StickFightFortDefense
             }
 
             float cooldown = AbilityCooldown(ability);
-            status = label + " activated — ready again in " + cooldown.ToString("F0") + "s. (E keyboard / Up + Block controller)";
+            status = label + " activated — ready again in " + cooldown.ToString("F0") + "s. (E keyboard / R1 или △ controller)";
             statusUntil = Time.time + 3f;
             Logger.LogInfo(label + " activated by local player " + player.playerID + ".");
         }
@@ -2723,6 +2895,15 @@ namespace StickFightFortDefense
                 yield return null;
             }
             DestroyEffectTree(root);
+        }
+
+        // Purple flash at both ends of a stuck-enemy relocation (called from the AI patches).
+        public static void ShowRescuePuff(Vector3 from, Vector3 to)
+        {
+            if (CurrentPlugin == null) return;
+            Color puff = new Color(0.75f, 0.45f, 1f, 1f);
+            CurrentPlugin.StartCoroutine(CurrentPlugin.AnimateShockwave(from, 1.6f, puff, Color.white, 0.35f, 1, 0));
+            CurrentPlugin.StartCoroutine(CurrentPlugin.AnimateShockwave(to, 1.6f, puff, Color.white, 0.35f, 1, 0));
         }
 
         // ---- Cyan air step ----
@@ -4146,6 +4327,7 @@ namespace StickFightFortDefense
         {
             if (player == null || colorPanel == null) return;
             colorMenuPlayer = player;
+            menuOpenFrame = Time.frameCount;
             if (colorDescription != null)
             {
                 CharacterInformation info = player.GetComponent<CharacterInformation>();
@@ -4457,7 +4639,7 @@ namespace StickFightFortDefense
             ControllerHandler players = ControllerHandler.Instance;
             if (players == null || players.players == null)
             {
-                return "Ability: E (keyboard) / Up + Block (controller)";
+                return "Ability: E (keyboard) / R1 или △ (controller)";
             }
             string[] names = new string[] { "Red", "Pink", "Green", "Purple", "Blue", "Yellow", "Orange", "Cyan", "Brown", "Gray", "Snow", "Dark Blue", "Lilac", "Gold", "Turquoise", "Lime", "Raspberry", "Steel", "Lemon" };
             List<string> lines = new List<string>();
@@ -4473,11 +4655,11 @@ namespace StickFightFortDefense
                 float readyAt;
                 float remaining = abilityReadyAt.TryGetValue(player.playerID, out readyAt)
                     ? Mathf.Max(0f, readyAt - Time.unscaledTime) : 0f;
-                string input = player.playerID == 0 ? "E" : "Up + Block";
+                string input = player.playerID == 0 ? "E" : "R1/△";
                 lines.Add("P" + (player.playerID + 1) + " " + names[Mathf.Clamp(ability, 0, names.Length - 1)] +
                     " ability: " + (remaining <= 0f ? "READY" : remaining.ToString("F0") + "s") + " (" + input + ")");
             }
-            return lines.Count == 0 ? "Ability: E (keyboard) / Up + Block (controller)" : String.Join(" | ", lines.ToArray());
+            return lines.Count == 0 ? "Ability: E (keyboard) / R1 или △ (controller)" : String.Join(" | ", lines.ToArray());
         }
 
         private void RunConsoleCommand(string command)
@@ -5039,6 +5221,11 @@ namespace StickFightFortDefense
             public int lastMode = -1;
             public bool loggedNavigationJump;
             public bool followingWaypoint;
+            // Stuck detection: the enemy must move at least a little every few seconds.
+            public Vector3 checkpointPosition;
+            public float checkpointAt;
+            public float lastRescueAt;
+            public int rescueCount;
             public List<NavigationNode> path = new List<NavigationNode>();
             public GameObject targetObject;
             public Rigidbody targetBody;
@@ -5230,6 +5417,8 @@ namespace StickFightFortDefense
                 route.targetBody = route.targetObject.AddComponent<Rigidbody>();
                 route.targetBody.isKinematic = true;
                 route.targetBody.useGravity = false;
+                route.checkpointPosition = aiPosition;
+                route.checkpointAt = Time.unscaledTime;
                 Routes[id] = route;
             }
 
@@ -5278,6 +5467,19 @@ namespace StickFightFortDefense
             bool canReachTargetHeight = player.position.y - head.position.y < heightRange;
             float combatRange = route.lastMode == 1 ? attackRange + 1.5f : attackRange + 0.5f;
             bool inCombatRange = distanceToPlayer <= combatRange && canReachTargetHeight;
+            // Safety net for maps where the bots cannot use the level (hanging or moving
+            // bridges, gaps): an enemy that has not moved for several seconds and is not
+            // fighting is put back on solid ground near the players.
+            if (inCombatRange || IsRooted(controller) || Vector3.Distance(aiPosition, route.checkpointPosition) > 1.2f)
+            {
+                route.checkpointPosition = aiPosition;
+                route.checkpointAt = Time.unscaledTime;
+            }
+            else if (Time.unscaledTime - route.checkpointAt > StuckRescueSeconds &&
+                Time.unscaledTime - route.lastRescueAt > 10f && route.rescueCount < 3)
+            {
+                RescueStuckEnemy(controller, aiPosition, player.position, route);
+            }
             bool followingWaypoint = route.waypoint < route.path.Count && !inCombatRange;
             int mode = inCombatRange ? 1 : (followingWaypoint ? 0 : 2);
             route.followingWaypoint = followingWaypoint;
@@ -5314,6 +5516,55 @@ namespace StickFightFortDefense
             {
                 AITargetInformationField.SetValue(ai, playerInfo);
             }
+        }
+
+        private const float StuckRescueSeconds = 6f;
+
+        // Moves a stuck enemy's whole ragdoll onto a solid platform on the players' level,
+        // a few units away from them so it still has to walk in and fight.
+        private static void RescueStuckEnemy(Controller controller, Vector3 from, Vector3 playerPosition, NavigationRoute route)
+        {
+            route.lastRescueAt = Time.unscaledTime;
+            route.checkpointAt = Time.unscaledTime;
+            if (controller == null) return;
+            if (NavigationNodes.Count == 0) BuildNavigationNodes();
+            List<NavigationNode> candidates = new List<NavigationNode>();
+            NavigationNode nearest = null;
+            float nearestDistance = Single.MaxValue;
+            for (int i = 0; i < NavigationNodes.Count; i++)
+            {
+                Vector3 p = NavigationNodes[i].position;
+                float dz = Mathf.Abs(p.z - playerPosition.z);
+                float dy = Mathf.Abs(p.y - playerPosition.y);
+                if (dz >= 4f && dz <= 10f && dy <= 2.5f) candidates.Add(NavigationNodes[i]);
+                float distance = Vector3.Distance(p, playerPosition);
+                if (distance >= 3f && distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = NavigationNodes[i];
+                }
+            }
+            NavigationNode chosen = candidates.Count > 0 ? candidates[UnityEngine.Random.Range(0, candidates.Count)] : nearest;
+            if (chosen == null) return;
+            // The head sits about 2.7 units above the platform surface point.
+            Vector3 destination = chosen.position + Vector3.up * 2.75f;
+            Vector3 delta = destination - from;
+            Rigidbody[] bodies = controller.GetComponentsInChildren<Rigidbody>();
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                Rigidbody body = bodies[i];
+                if (body == null || body.isKinematic) continue;
+                body.position = body.position + delta;
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+            }
+            route.rescueCount++;
+            route.path.Clear();
+            route.waypoint = 0;
+            route.repathAt = 0f;
+            Plugin.LogNavigation("AI " + controller.GetInstanceID() + " was stuck for " + StuckRescueSeconds.ToString("F0") +
+                "s; moved from " + from + " to " + destination + " (rescue " + route.rescueCount + "/3).");
+            Plugin.ShowRescuePuff(from, destination);
         }
 
         private static List<NavigationNode> FindFastestPlatformPath(Vector3 start, Vector3 goal, out bool reachesPlayer)
@@ -5437,6 +5688,7 @@ namespace StickFightFortDefense
         {
             NavigationNodes.Clear();
             NavigationPlatformBounds.Clear();
+            int jointPlatforms = 0;
             Collider[] colliders = UnityEngine.Object.FindObjectsOfType(typeof(Collider)) as Collider[];
             if (colliders == null)
             {
@@ -5452,7 +5704,13 @@ namespace StickFightFortDefense
                 Rigidbody body = collider.attachedRigidbody;
                 if (body != null && !body.isKinematic)
                 {
-                    continue;
+                    // Hanging / swinging bridges are dynamic bodies held by joints; loose
+                    // props (crates, weapons) have none and stay excluded.
+                    if (collider.GetComponentInParent<Joint>() == null)
+                    {
+                        continue;
+                    }
+                    jointPlatforms++;
                 }
                 Bounds bounds = collider.bounds;
                 if (bounds.size.z < 0.8f || bounds.size.y > 3.5f || bounds.size.z > 40f)
@@ -5487,7 +5745,14 @@ namespace StickFightFortDefense
                     }
                 }
             }
+            if (jointPlatforms != lastJointPlatformCount)
+            {
+                lastJointPlatformCount = jointPlatforms;
+                Plugin.LogNavigation("Navigation graph includes " + jointPlatforms + " jointed (hanging / swinging) platform collider(s).");
+            }
         }
+
+        private static int lastJointPlatformCount = -1;
 
         public static bool TryChooseEnemySpawnPoint(out Vector3 point, IList<Vector3> reservedPoints)
         {

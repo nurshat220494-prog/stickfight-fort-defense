@@ -10,7 +10,7 @@ using UnityEngine.UI;
 
 namespace StickFightFortDefense
 {
-[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.8.95")]
+[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.9.0")]
     public sealed class Plugin : BaseUnityPlugin
     {
         private const int AbilityColorCount = 19;
@@ -201,7 +201,7 @@ namespace StickFightFortDefense
         {
             CurrentPlugin = this;
             Application.runInBackground = true;
-            Logger.LogInfo("Fort Defense 0.8.95 Awake entered; background simulation enabled.");
+            Logger.LogInfo("Fort Defense 0.9.0 Awake entered; background simulation enabled.");
             try
             {
                 InstallEnemyAIPatches();
@@ -295,7 +295,10 @@ namespace StickFightFortDefense
                     ParameterInfo[] parameters = methods[i].GetParameters();
                     bool takesContact = false;
                     for (int j = 0; j < parameters.Length; j++)
-                        if (parameters[j].ParameterType == typeof(Collision) || parameters[j].ParameterType == typeof(Collider)) takesContact = true;
+                        // Type.op_Equality does not exist on this game's Mono runtime; compare by reference.
+                        Type parameterType = parameters[j].ParameterType;
+                        if (System.Object.ReferenceEquals(parameterType, typeof(Collision)) ||
+                            System.Object.ReferenceEquals(parameterType, typeof(Collider))) takesContact = true;
                     if (!takesContact || methods[i].IsAbstract || methods[i].ContainsGenericParameters) continue;
                     Type patchType = typeof(EnemyAIPatches);
                     harmony.Patch(methods[i],
@@ -1120,6 +1123,13 @@ namespace StickFightFortDefense
                 medicPlayers.Add(id);
                 if (health != null) health.health = Mathf.Min(health.maxHealth, health.health + 15f);
             }
+            // Visible confirmation: without it the perks looked like they did nothing.
+            string[] perkPopups = new string[] { "+20% МАКС. ЗДОРОВЬЕ", "АТАКИ БЫСТРЕЕ +15%", "УРОН ПО ТЕБЕ -10%", "МЕДИК: +15 HP КАЖДУЮ ВОЛНУ" };
+            Color perkColor = new Color(1f, 0.85f, 0.2f, 1f);
+            ShowFloatingText(GetActorPosition(player) + Vector3.up * 1.6f,
+                perk >= 0 && perk < perkPopups.Length ? perkPopups[perk] : GetPerkName(perk), perkColor, 2.4f);
+            FlashCharacter(player, perkColor, 0.9f, 3f);
+            CreateExplosionEffect(GetActorPosition(player), 2.2f, perkColor, 0.5f);
             Logger.LogInfo("Applied perk " + GetPerkName(perk) + " to player " + (player.playerID + 1) + ". Max HP=" +
                 (health == null ? "n/a" : health.maxHealth.ToString("F1")) + ", attack-rate modifier=" +
                 GetPunchCooldownResetMultiplier(player).ToString("F2") + ".");
@@ -2968,6 +2978,41 @@ namespace StickFightFortDefense
             StartCoroutine(FloatHealText(label));
         }
 
+        // Generic floating world-space message that drifts up and fades out.
+        private void ShowFloatingText(Vector3 position, string message, Color color, float seconds)
+        {
+            GameObject label = new GameObject("FortDefense_FloatingText");
+            label.transform.position = position;
+            TextMesh text = label.AddComponent<TextMesh>();
+            text.text = message;
+            text.color = color;
+            text.fontSize = 64;
+            text.characterSize = 0.1f;
+            text.fontStyle = FontStyle.Bold;
+            text.anchor = TextAnchor.MiddleCenter;
+            MeshRenderer textRenderer = label.GetComponent<MeshRenderer>();
+            if (textRenderer != null) textRenderer.sortingOrder = 600;
+            StartCoroutine(FloatText(label, seconds));
+        }
+
+        private IEnumerator FloatText(GameObject label, float seconds)
+        {
+            float start = Time.unscaledTime;
+            Vector3 origin = label.transform.position;
+            while (label != null && Time.unscaledTime - start < seconds)
+            {
+                float t = (Time.unscaledTime - start) / seconds;
+                label.transform.position = origin + Vector3.up * (t * 1.1f);
+                label.transform.forward = Camera.main == null ? Vector3.forward : Camera.main.transform.forward;
+                TextMesh text = label.GetComponent<TextMesh>();
+                Color color = text.color;
+                color.a = t < 0.6f ? 1f : 1f - (t - 0.6f) / 0.4f;
+                text.color = color;
+                yield return null;
+            }
+            if (label != null) Destroy(label);
+        }
+
         private IEnumerator FloatHealText(GameObject label)
         {
             float start = Time.unscaledTime;
@@ -3856,7 +3901,7 @@ namespace StickFightFortDefense
             float multiplier = 1f;
             HashSet<int> owned;
             if (CurrentPlugin.selectedPerks.TryGetValue(player.playerID, out owned) && owned != null && owned.Contains(1))
-                multiplier *= 0.85f;
+                multiplier *= 1f / 1.15f; // 15% faster attacks = 1.15x attack rate
             // Red rage halves the time between punches.
             if (IsRageActive(player)) multiplier *= 0.5f;
             return multiplier;
@@ -4579,7 +4624,7 @@ namespace StickFightFortDefense
             List<string> parts = new List<string>();
             if (owned.Contains(0) && health != null)
                 parts.Add("HP " + health.health.ToString("F0") + "/" + health.maxHealth.ToString("F0"));
-            if (owned.Contains(1)) parts.Add("атака +18%");
+            if (owned.Contains(1)) parts.Add("атака +15%");
             if (owned.Contains(2)) parts.Add("урон -10%");
             if (owned.Contains(3)) parts.Add("медик +15");
             return parts.Count == 0 ? String.Empty : " [" + String.Join(", ", parts.ToArray()) + "]";

@@ -10,7 +10,7 @@ using UnityEngine.UI;
 
 namespace StickFightFortDefense
 {
-[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.8.97")]
+[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.9.1")]
     public sealed class Plugin : BaseUnityPlugin
     {
         private const int AbilityColorCount = 19;
@@ -203,7 +203,7 @@ namespace StickFightFortDefense
         {
             CurrentPlugin = this;
             Application.runInBackground = true;
-            Logger.LogInfo("Fort Defense 0.8.95 Awake entered; background simulation enabled.");
+            Logger.LogInfo("Fort Defense 0.9.1 Awake entered; background simulation enabled.");
             try
             {
                 InstallEnemyAIPatches();
@@ -302,6 +302,7 @@ namespace StickFightFortDefense
             UpdateRageEffects();
             UpdateAbilityEffects();
             UpdateRootedEffects();
+            UpdateAirStepMarkers();
             UpdateRunPerks();
             UpdateGoldCrushExpiry();
             UpdateParasiticSeeds();
@@ -1085,6 +1086,12 @@ namespace StickFightFortDefense
                 medicPlayers.Add(id);
                 if (health != null) health.health = Mathf.Min(health.maxHealth, health.health + 15f);
             }
+            // Visible confirmation so a chosen perk no longer looks like it did nothing.
+            string[] perkPopups = new string[] { "+20% МАКС. ЗДОРОВЬЕ", "АТАКИ БЫСТРЕЕ", "УРОН ПО ТЕБЕ -10%", "МЕДИК: +15 HP КАЖДУЮ ВОЛНУ" };
+            ShowFloatingText(GetActorPosition(player) + Vector3.up * 1.6f,
+                perk >= 0 && perk < perkPopups.Length ? perkPopups[perk] : GetPerkName(perk), new Color(1f, 0.85f, 0.2f, 1f), 2.4f);
+            StartCoroutine(AnimateShockwave(GetActorPosition(player), 2.2f, new Color(1f, 0.85f, 0.2f, 1f),
+                new Color(1f, 1f, 0.7f, 1f), 0.5f, 1, 0));
             Logger.LogInfo("Applied perk " + GetPerkName(perk) + " to player " + (player.playerID + 1) + ". Max HP=" +
                 (health == null ? "n/a" : health.maxHealth.ToString("F1")) + ", attack-rate modifier=" +
                 GetPunchCooldownResetMultiplier(player).ToString("F2") + ".");
@@ -1559,7 +1566,7 @@ namespace StickFightFortDefense
             else if (ability == 4)
             {
                 label = "Blue impulse";
-                PushNearbyEnemies(player, 7f, 9f);
+                PushNearbyEnemies(player, 7f, 14f);
             }
             else if (ability == 5)
             {
@@ -1572,25 +1579,15 @@ namespace StickFightFortDefense
             else if (ability == 6)
             {
                 label = "Orange detonation";
-                DamageNearbyEnemies(player, 5f, 14f, 9f);
-                CreateExplosionEffect(GetActorPosition(player), 5f, new Color(1f, 0.35f, 0.03f, 0.9f), 0.65f);
+                DamageNearbyEnemies(player, 5f, 14f, 11f);
+                StartCoroutine(AnimateShockwave(GetActorPosition(player), 5f, new Color(1f, 0.38f, 0.03f, 1f),
+                    new Color(1f, 0.92f, 0.35f, 1f), 0.6f, 3, 16));
+                ShowFloatingText(GetActorPosition(player) + Vector3.up * 1.7f, "ДЕТОНАЦИЯ", new Color(1f, 0.55f, 0.1f, 1f), 1.2f);
             }
             else if (ability == 7)
             {
                 label = "Cyan air step";
-                Rigidbody body = GetActorBody(player);
-                if (body != null)
-                {
-                    float direction = player.LookRotation.x < 0f ? -1f : 1f;
-                    Vector3 velocity = body.velocity;
-                    velocity.y = Mathf.Max(velocity.y, 8f);
-                    velocity.z = direction * Mathf.Max(Mathf.Abs(velocity.z), 4f);
-                    body.velocity = velocity;
-                    CreateExplosionEffect(body.position, 1.8f, new Color(0.1f, 0.9f, 1f, 0.85f), 0.35f);
-                    status = "Голубой воздушный шаг активирован — дополнительный прыжок!";
-                    statusUntil = Time.unscaledTime + 2f;
-                    Logger.LogInfo("Cyan air step set vertical velocity to " + velocity.y.ToString("F1") + " for local player " + player.playerID + ".");
-                }
+                ActivateAirStep(player);
             }
             else if (ability == 8)
             {
@@ -1884,8 +1881,9 @@ namespace StickFightFortDefense
             tether.startColor = new Color(1f, 0.12f, 0.38f, 0.95f);
             tether.endColor = new Color(1f, 0.48f, 0.7f, 0.55f);
             tether.numCapVertices = 4;
-            Shader shader = Shader.Find("Sprites/Default");
-            if (shader != null) tether.material = new Material(shader);
+            Material tetherMaterial = NewEffectMaterial(Color.white);
+            if (tetherMaterial != null) tether.material = tetherMaterial;
+            tether.sortingOrder = 450;
             RescueOath oath = new RescueOath();
             oath.Owner = owner;
             oath.Ally = ally;
@@ -2454,8 +2452,12 @@ namespace StickFightFortDefense
             line.startColor = color;
             line.endColor = new Color(color.r, color.g, color.b, 0.15f);
             line.numCapVertices = 3;
-            line.material = new Material(Shader.Find("Sprites/Default"));
-            line.material.color = color;
+            Material ringMaterial = NewEffectMaterial(Color.white);
+            if (ringMaterial != null) line.material = ringMaterial;
+            // Without an explicit sorting order the ring was drawn behind the map. The
+            // enemy-spawn warning ring (order 300) and the purple beam (400) are visible;
+            // every ability ring that left this at 0 was not.
+            line.sortingOrder = 500;
             for (int i = 0; i < 49; i++)
             {
                 float angle = (float)i / 48f * Mathf.PI * 2f;
@@ -2490,40 +2492,422 @@ namespace StickFightFortDefense
             if (ring != null) Destroy(ring);
         }
 
+        // ------------------------------------------------------------------
+        // Shared helpers for the blue / yellow / orange / cyan ability visuals.
+        // Everything is drawn in world space with an explicit sorting order, the
+        // same way the (visible) enemy spawn warning ring is.
+        // ------------------------------------------------------------------
+        private Material effectMaterialTemplate;
+        private bool effectShaderLogged;
+
+        private Material NewEffectMaterial(Color tint)
+        {
+            if (effectMaterialTemplate == null)
+            {
+                Shader shader = Shader.Find("Sprites/Default");
+                if (shader == null) shader = Shader.Find("Unlit/Transparent");
+                if (shader == null) shader = Shader.Find("Unlit/Color");
+                if (shader == null) shader = Shader.Find("GUI/Text Shader");
+                if (shader == null)
+                {
+                    Logger.LogError("No usable shader was found for ability visuals.");
+                    return null;
+                }
+                effectMaterialTemplate = new Material(shader);
+                if (!effectShaderLogged)
+                {
+                    effectShaderLogged = true;
+                    Logger.LogInfo("Ability visuals use shader " + shader.name + ".");
+                }
+            }
+            Material material = new Material(effectMaterialTemplate);
+            material.color = tint;
+            return material;
+        }
+
+        private LineRenderer NewWorldLine(string name, int points, bool loop, Color start, Color end,
+            float startWidth, float endWidth, int order)
+        {
+            GameObject obj = new GameObject(name);
+            LineRenderer line = obj.AddComponent<LineRenderer>();
+            line.useWorldSpace = true;
+            line.loop = loop;
+            line.positionCount = points;
+            line.startWidth = startWidth;
+            line.endWidth = endWidth;
+            line.startColor = start;
+            line.endColor = end;
+            line.numCapVertices = 4;
+            Material material = NewEffectMaterial(Color.white);
+            if (material != null) line.material = material;
+            line.sortingOrder = order;
+            return line;
+        }
+
+        // A filled fan of unit radius in the gameplay (Y/Z) plane; angles run from +Z toward +Y.
+        // Scale it (1, r, r) to size it. Edge vertices are fainter than the centre.
+        private GameObject NewFilledSector(string name, Color color, float startDegrees, float endDegrees,
+            int segments, float edgeAlphaFactor, int order)
+        {
+            GameObject obj = new GameObject(name);
+            MeshFilter filter = obj.AddComponent<MeshFilter>();
+            MeshRenderer meshRenderer = obj.AddComponent<MeshRenderer>();
+            Mesh mesh = new Mesh();
+            mesh.name = name + "_Mesh";
+            Vector3[] vertices = new Vector3[segments + 2];
+            Color[] colors = new Color[segments + 2];
+            int[] triangles = new int[segments * 3];
+            vertices[0] = Vector3.zero;
+            colors[0] = color;
+            Color edge = new Color(color.r, color.g, color.b, color.a * edgeAlphaFactor);
+            for (int i = 0; i <= segments; i++)
+            {
+                float angle = Mathf.Lerp(startDegrees, endDegrees, (float)i / (float)segments) * Mathf.Deg2Rad;
+                vertices[i + 1] = new Vector3(0f, Mathf.Sin(angle), Mathf.Cos(angle));
+                colors[i + 1] = edge;
+            }
+            for (int i = 0; i < segments; i++)
+            {
+                triangles[i * 3] = 0;
+                triangles[i * 3 + 1] = i + 1;
+                triangles[i * 3 + 2] = i + 2;
+            }
+            mesh.vertices = vertices;
+            mesh.colors = colors;
+            mesh.triangles = triangles;
+            mesh.RecalculateBounds();
+            filter.sharedMesh = mesh;
+            Material material = NewEffectMaterial(Color.white);
+            if (material != null) meshRenderer.sharedMaterial = material;
+            meshRenderer.sortingOrder = order;
+            return obj;
+        }
+
+        private static void SetFillAlpha(GameObject fill, float alpha)
+        {
+            MeshRenderer meshRenderer = fill == null ? null : fill.GetComponent<MeshRenderer>();
+            if (meshRenderer == null || meshRenderer.sharedMaterial == null) return;
+            meshRenderer.sharedMaterial.color = new Color(1f, 1f, 1f, Mathf.Clamp01(alpha));
+        }
+
+        private static void DestroyEffectTree(GameObject obj)
+        {
+            if (obj == null) return;
+            MeshFilter[] filters = obj.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < filters.Length; i++)
+                if (filters[i] != null && filters[i].sharedMesh != null) Destroy(filters[i].sharedMesh);
+            Destroy(obj);
+        }
+
+        // Direction (-1 / +1 along the Z axis) the player is facing. The keyboard player
+        // faces the mouse; controller players use the game's own look direction.
+        private float GetFacingDirection(Controller player)
+        {
+            if (player == null) return 1f;
+            if (player.playerID == 0 && !player.isAI)
+            {
+                Camera camera = Camera.main;
+                if (camera != null)
+                {
+                    Vector3 actor = GetActorPosition(player);
+                    Ray ray = camera.ScreenPointToRay(Input.mousePosition);
+                    Plane gameplayPlane = new Plane(Vector3.right, new Vector3(actor.x, 0f, 0f));
+                    float distance;
+                    if (gameplayPlane.Raycast(ray, out distance))
+                    {
+                        float dz = ray.GetPoint(distance).z - actor.z;
+                        if (Mathf.Abs(dz) > 0.3f) return dz < 0f ? -1f : 1f;
+                    }
+                }
+            }
+            return player.LookRotation.x < 0f ? -1f : 1f;
+        }
+
+        // Short world-space message that drifts up and fades out.
+        private void ShowFloatingText(Vector3 position, string message, Color color, float seconds)
+        {
+            GameObject label = new GameObject("FortDefense_FloatingText");
+            label.transform.position = position;
+            TextMesh text = label.AddComponent<TextMesh>();
+            text.text = message;
+            text.color = color;
+            text.fontSize = 64;
+            text.characterSize = 0.1f;
+            text.fontStyle = FontStyle.Bold;
+            text.anchor = TextAnchor.MiddleCenter;
+            MeshRenderer textRenderer = label.GetComponent<MeshRenderer>();
+            if (textRenderer != null) textRenderer.sortingOrder = 600;
+            StartCoroutine(FloatText(label, seconds));
+        }
+
+        private IEnumerator FloatText(GameObject label, float seconds)
+        {
+            float start = Time.unscaledTime;
+            Vector3 origin = label.transform.position;
+            while (label != null && Time.unscaledTime - start < seconds)
+            {
+                float t = (Time.unscaledTime - start) / seconds;
+                label.transform.position = origin + Vector3.up * (t * 0.9f);
+                label.transform.forward = Camera.main == null ? Vector3.forward : Camera.main.transform.forward;
+                TextMesh text = label.GetComponent<TextMesh>();
+                Color color = text.color;
+                color.a = t < 0.6f ? 1f : 1f - (t - 0.6f) / 0.4f;
+                text.color = color;
+                yield return null;
+            }
+            if (label != null) Destroy(label);
+        }
+
+        // Expanding shockwave: a faint filling disc, ringCount rings that chase each
+        // other outward, and (when spokeCount > 0) a bright core with radial sparks.
+        private IEnumerator AnimateShockwave(Vector3 center, float radius, Color color, Color core,
+            float duration, int ringCount, int spokeCount)
+        {
+            GameObject root = new GameObject("FortDefense_Shockwave");
+            GameObject disc = NewFilledSector("Fill", new Color(color.r, color.g, color.b, 0.5f), 0f, 360f, 36, 0.15f, 480);
+            disc.transform.SetParent(root.transform, false);
+            GameObject coreDisc = null;
+            if (spokeCount > 0)
+            {
+                coreDisc = NewFilledSector("Core", new Color(core.r, core.g, core.b, 0.9f), 0f, 360f, 28, 0.35f, 485);
+                coreDisc.transform.SetParent(root.transform, false);
+            }
+            int rings = Mathf.Max(1, ringCount);
+            LineRenderer[] ringLines = new LineRenderer[rings];
+            for (int i = 0; i < rings; i++)
+            {
+                ringLines[i] = NewWorldLine("Ring", 49, true, color, core, 0.26f, 0.26f, 510 + i);
+                ringLines[i].transform.SetParent(root.transform, false);
+            }
+            LineRenderer[] spokes = new LineRenderer[spokeCount];
+            for (int i = 0; i < spokeCount; i++)
+            {
+                spokes[i] = NewWorldLine("Spoke", 2, false, core, new Color(color.r, color.g, color.b, 0f), 0.22f, 0.03f, 505);
+                spokes[i].transform.SetParent(root.transform, false);
+            }
+            float started = Time.unscaledTime;
+            while (root != null && Time.unscaledTime - started < duration)
+            {
+                float t = Mathf.Clamp01((Time.unscaledTime - started) / duration);
+                float eased = 1f - (1f - t) * (1f - t);
+                float r = Mathf.Max(0.1f, radius * eased);
+                disc.transform.position = center;
+                disc.transform.localScale = new Vector3(1f, r, r);
+                SetFillAlpha(disc, 1f - t);
+                if (coreDisc != null)
+                {
+                    coreDisc.transform.position = center;
+                    coreDisc.transform.localScale = new Vector3(1f, r * 0.55f, r * 0.55f);
+                    SetFillAlpha(coreDisc, 1f - t * 1.2f);
+                }
+                for (int i = 0; i < rings; i++)
+                {
+                    float ti = Mathf.Clamp01(t - (float)i * 0.14f);
+                    float ri = Mathf.Max(0.1f, radius * (1f - (1f - ti) * (1f - ti)));
+                    float fade = Mathf.Clamp01(1f - ti);
+                    ringLines[i].startColor = new Color(color.r, color.g, color.b, fade);
+                    ringLines[i].endColor = new Color(core.r, core.g, core.b, fade);
+                    for (int p = 0; p < 49; p++)
+                    {
+                        float angle = (float)p / 49f * Mathf.PI * 2f;
+                        ringLines[i].SetPosition(p, center + new Vector3(0f, Mathf.Sin(angle) * ri, Mathf.Cos(angle) * ri));
+                    }
+                }
+                for (int i = 0; i < spokeCount; i++)
+                {
+                    float angle = (float)i / (float)spokeCount * Mathf.PI * 2f + 0.26f;
+                    Vector3 dir = new Vector3(0f, Mathf.Sin(angle), Mathf.Cos(angle));
+                    spokes[i].SetPosition(0, center + dir * (r * 0.5f));
+                    spokes[i].SetPosition(1, center + dir * (r + 0.5f));
+                }
+                yield return null;
+            }
+            DestroyEffectTree(root);
+        }
+
+        // ---- Cyan air step ----
+        // An extra jump at any moment: every part of the ragdoll is launched upward
+        // together (launching only the torso left the legs behind and the game's own
+        // movement cancelled it).
+        private void ActivateAirStep(Controller player)
+        {
+            Rigidbody[] bodies = player.GetComponentsInChildren<Rigidbody>();
+            float facing = GetFacingDirection(player);
+            int moved = 0;
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                Rigidbody body = bodies[i];
+                if (body == null || body.isKinematic) continue;
+                Vector3 velocity = body.velocity;
+                velocity.y = Mathf.Max(velocity.y, 11f);
+                if (Mathf.Abs(velocity.z) < 2f) velocity.z = facing * 2.5f;
+                body.velocity = velocity;
+                moved++;
+            }
+            StartCoroutine(AirStepRings(player));
+            ShowFloatingText(GetActorPosition(player) + Vector3.up * 1.9f, "ВОЗДУШНЫЙ ШАГ", new Color(0.3f, 1f, 1f, 1f), 1.2f);
+            status = "ВОЗДУШНЫЙ ШАГ — дополнительный прыжок!";
+            statusUntil = Time.unscaledTime + 2f;
+            Logger.LogInfo("Cyan air step launched " + moved + " rigidbodies of local player " + player.playerID + " upward.");
+        }
+
+        private IEnumerator AirStepRings(Controller player)
+        {
+            for (int i = 0; i < 3 && player != null; i++)
+            {
+                Vector3 feet = GetActorPosition(player) + Vector3.down * 0.9f;
+                StartCoroutine(AnimateShockwave(feet, 1.7f, new Color(0.1f, 0.95f, 1f, 1f), new Color(0.85f, 1f, 1f, 1f), 0.4f, 1, 0));
+                yield return new WaitForSecondsRealtime(0.1f);
+            }
+        }
+
+        // A bobbing chevron above the head shows the extra jump is available; it
+        // disappears while the ability recharges.
+        private readonly Dictionary<int, LineRenderer> airStepMarkers = new Dictionary<int, LineRenderer>();
+
+        private void UpdateAirStepMarkers()
+        {
+            ControllerHandler players = ControllerHandler.Instance;
+            HashSet<int> keep = new HashSet<int>();
+            if (modeStarted && players != null && players.players != null)
+            {
+                for (int i = 0; i < players.players.Count; i++)
+                {
+                    Controller player = players.players[i];
+                    CharacterInformation info = player == null ? null : player.GetComponent<CharacterInformation>();
+                    if (player == null || player.isAI || info == null || info.isDead) continue;
+                    if (GetPlayerAbilityIndex(player, info) != 7) continue;
+                    float readyAt;
+                    if (abilityReadyAt.TryGetValue(player.playerID, out readyAt) && Time.unscaledTime < readyAt) continue;
+                    int id = player.GetInstanceID();
+                    keep.Add(id);
+                    LineRenderer marker;
+                    if (!airStepMarkers.TryGetValue(id, out marker) || marker == null)
+                    {
+                        Color cyan = new Color(0.1f, 0.95f, 1f, 1f);
+                        marker = NewWorldLine("FortDefense_AirStepReady", 3, false, cyan, cyan, 0.12f, 0.12f, 550);
+                        airStepMarkers[id] = marker;
+                    }
+                    Vector3 center = GetActorPosition(player);
+                    float y = center.y + 1.8f + Mathf.Sin(Time.unscaledTime * 6f) * 0.09f;
+                    marker.SetPosition(0, new Vector3(center.x, y, center.z - 0.32f));
+                    marker.SetPosition(1, new Vector3(center.x, y + 0.3f, center.z));
+                    marker.SetPosition(2, new Vector3(center.x, y, center.z + 0.32f));
+                }
+            }
+            if (airStepMarkers.Count == 0) return;
+            List<int> stale = new List<int>();
+            foreach (KeyValuePair<int, LineRenderer> item in airStepMarkers)
+                if (!keep.Contains(item.Key)) stale.Add(item.Key);
+            for (int i = 0; i < stale.Count; i++)
+            {
+                LineRenderer marker = airStepMarkers[stale[i]];
+                if (marker != null) Destroy(marker.gameObject);
+                airStepMarkers.Remove(stale[i]);
+            }
+        }
+
+        private void ClearAbilityObjects()
+        {
+            foreach (KeyValuePair<int, LineRenderer> item in airStepMarkers)
+                if (item.Value != null) Destroy(item.Value.gameObject);
+            airStepMarkers.Clear();
+            foreach (KeyValuePair<int, GameObject> item in shieldObjects)
+                DestroyEffectTree(item.Value);
+            shieldObjects.Clear();
+        }
+
         private void CreatePlayerBarrier(Controller owner, float duration)
         {
             if (owner == null) return;
             int id = owner.GetInstanceID();
             GameObject old;
             if (shieldObjects.TryGetValue(id, out old) && old != null) Destroy(old);
-            GameObject barrier = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            barrier.name = "FortDefense_YellowBarrier";
-            barrier.transform.localScale = new Vector3(3.5f, 3.5f, 0.32f);
-            Renderer renderer = barrier.GetComponent<Renderer>();
-            if (renderer != null)
-            {
-                Material material = new Material(Shader.Find("Legacy Shaders/Transparent/Diffuse"));
-                material.color = new Color(1f, 0.9f, 0.15f, 0.38f);
-                renderer.material = material;
-            }
-            Collider collider = barrier.GetComponent<Collider>();
-            if (collider != null) collider.isTrigger = false;
+            float facing = GetFacingDirection(owner);
+            GameObject barrier = new GameObject("FortDefense_YellowBarrier");
+            barrier.transform.position = GetActorPosition(owner);
+            // Physical wall: a thin slab in front of the player. It stops enemies and
+            // shots; the owner's and teammates' colliders are told to ignore it.
+            BoxCollider box = barrier.AddComponent<BoxCollider>();
+            box.size = new Vector3(3.4f, 3.4f, 0.4f);
+            box.center = new Vector3(0f, 0f, facing * BarrierDistance);
+            Rigidbody body = barrier.AddComponent<Rigidbody>();
+            body.isKinematic = true;
+            body.useGravity = false;
+            IgnoreBarrierCollisions(box);
+            // Visible shield: translucent fan plus a bright rim, drawn on top of the map.
+            GameObject panel = NewFilledSector("FortDefense_BarrierPanel", new Color(1f, 0.9f, 0.15f, 0.34f),
+                -62f, 62f, 20, 0.5f, 490);
+            panel.transform.SetParent(barrier.transform, false);
+            panel.transform.localScale = new Vector3(1f, BarrierRadius, BarrierRadius * facing);
+            LineRenderer rim = NewWorldLine("FortDefense_BarrierRim", 21, false,
+                new Color(1f, 0.95f, 0.3f, 1f), new Color(1f, 0.8f, 0.1f, 1f), 0.16f, 0.16f, 520);
+            rim.transform.SetParent(barrier.transform, false);
             shieldObjects[id] = barrier;
+            ShowFloatingText(GetActorPosition(owner) + Vector3.up * 2f, "БАРЬЕР", new Color(1f, 0.92f, 0.25f, 1f), 1.2f);
             StartCoroutine(RemoveBarrierAfter(id, barrier, duration));
+        }
+
+        private const float BarrierDistance = 1.45f;
+        private const float BarrierRadius = 1.8f;
+
+        // The shield must not shove the people it protects.
+        private void IgnoreBarrierCollisions(Collider barrierCollider)
+        {
+            ControllerHandler players = ControllerHandler.Instance;
+            if (players == null || players.players == null || barrierCollider == null) return;
+            for (int i = 0; i < players.players.Count; i++)
+            {
+                Controller candidate = players.players[i];
+                if (candidate == null || candidate.isAI) continue;
+                Collider[] colliders = candidate.GetComponentsInChildren<Collider>(true);
+                for (int j = 0; j < colliders.Length; j++)
+                    if (colliders[j] != null && colliders[j] != barrierCollider)
+                        Physics.IgnoreCollision(barrierCollider, colliders[j], true);
+            }
         }
 
         private IEnumerator RemoveBarrierAfter(int id, GameObject barrier, float duration)
         {
-            while (barrier != null && Time.unscaledTime < shieldUntil[id])
+            float endAt = Time.unscaledTime + duration;
+            LineRenderer rim = barrier == null ? null : barrier.GetComponentInChildren<LineRenderer>();
+            BoxCollider box = barrier == null ? null : barrier.GetComponent<BoxCollider>();
+            Transform panel = barrier == null ? null : barrier.transform.Find("FortDefense_BarrierPanel");
+            while (barrier != null && Time.unscaledTime < endAt)
             {
                 Controller owner = FindPlayerByInstanceId(id);
                 if (owner == null) break;
-                float direction = owner.LookRotation.x < 0f ? -1f : 1f;
-                barrier.transform.position = GetActorPosition(owner) + new Vector3(0f, 0f, direction * 1.25f);
+                // The shield follows the body and turns to wherever the player now looks.
+                Vector3 center = GetActorPosition(owner);
+                float facing = GetFacingDirection(owner);
+                barrier.transform.position = center;
+                if (box != null) box.center = new Vector3(0f, 0f, facing * BarrierDistance);
+                if (panel != null) panel.localScale = new Vector3(1f, BarrierRadius, BarrierRadius * facing);
+                if (rim != null)
+                {
+                    int points = rim.positionCount;
+                    Vector3 rimCenter = center + new Vector3(0f, 0f, 0f);
+                    for (int i = 0; i < points; i++)
+                    {
+                        float a = Mathf.Lerp(-62f, 62f, (float)i / (float)(points - 1)) * Mathf.Deg2Rad;
+                        rim.SetPosition(i, rimCenter + new Vector3(0f, Mathf.Sin(a) * BarrierRadius, Mathf.Cos(a) * BarrierRadius * facing));
+                    }
+                    float remaining = endAt - Time.unscaledTime;
+                    // Flicker during the last second so the player sees it is about to drop.
+                    float alpha = remaining < 1f ? 0.55f + 0.45f * Mathf.Sin(Time.unscaledTime * 24f) : 1f;
+                    rim.startColor = new Color(1f, 0.95f, 0.3f, alpha);
+                    rim.endColor = new Color(1f, 0.8f, 0.1f, alpha);
+                }
                 yield return null;
             }
+            if (panel != null)
+            {
+                MeshFilter panelFilter = panel.GetComponent<MeshFilter>();
+                if (panelFilter != null && panelFilter.sharedMesh != null) Destroy(panelFilter.sharedMesh);
+            }
             if (barrier != null) Destroy(barrier);
-            shieldObjects.Remove(id);
+            GameObject current;
+            if (shieldObjects.TryGetValue(id, out current) && (current == barrier || current == null)) shieldObjects.Remove(id);
         }
 
         private Controller FindPlayerByInstanceId(int id)
@@ -2699,15 +3083,19 @@ namespace StickFightFortDefense
                     Controller target = enemies[i] == null || System.Object.ReferenceEquals(AIControllerField, null)
                         ? null : AIControllerField.GetValue(enemies[i]) as Controller;
                     CharacterInformation info = target == null ? null : target.GetComponent<CharacterInformation>();
-                    Rigidbody body = GetActorBody(target);
                     if (target == null || !target.isAI || info == null || info.isDead ||
-                        Vector3.Distance(GetActorPosition(owner), GetActorPosition(target)) > radius || body == null)
+                        Vector3.Distance(GetActorPosition(owner), GetActorPosition(target)) > radius)
                     {
                         continue;
                     }
-                    Vector3 direction = GetActorPosition(target) - GetActorPosition(owner);
-                    direction.y = Mathf.Max(0.35f, direction.y);
-                    body.AddForce(direction.normalized * force, ForceMode.Impulse);
+                    // Closer enemies are thrown harder. The whole ragdoll gets the same
+                    // velocity change (a single impulse on the torso moved it <1 m/s).
+                    Vector3 away = GetActorPosition(target) - GetActorPosition(owner);
+                    float distance = away.magnitude;
+                    float side = Mathf.Abs(away.z) < 0.25f ? GetFacingDirection(owner) : Mathf.Sign(away.z);
+                    float falloff = Mathf.Lerp(1f, 0.55f, Mathf.Clamp01(distance / radius));
+                    ApplyVelocityChangeAll(target, new Vector3(0f, 0.55f, side).normalized * (force * falloff));
+                    StunEnemy(target, 0.9f);
                     count++;
                 }
             }
@@ -2719,15 +3107,43 @@ namespace StickFightFortDefense
                 for (int i = 0; i < nearby.Length; i++)
                 {
                     Rigidbody body = nearby[i] == null ? null : nearby[i].attachedRigidbody;
-                    if (body == null || body.isKinematic || body.transform.IsChildOf(owner.transform) || !pushedBodies.Add(body.GetInstanceID())) continue;
+                    if (body == null || body.isKinematic || !pushedBodies.Add(body.GetInstanceID())) continue;
+                    // Characters were handled above (enemies) or must not be shoved (players).
+                    if (body.GetComponentInParent<Controller>() != null) { pushedBodies.Remove(body.GetInstanceID()); continue; }
                     Vector3 direction = body.worldCenterOfMass - ownerPosition;
-                    if (direction.sqrMagnitude < 0.01f) direction = Vector3.forward;
-                    direction.y = Mathf.Max(0.4f, direction.y);
-                    body.AddForce(direction.normalized * force, ForceMode.Impulse);
+                    float side = Mathf.Abs(direction.z) < 0.25f ? GetFacingDirection(owner) : Mathf.Sign(direction.z);
+                    // Dropped weapons and bullets: a fixed speed change, independent of mass.
+                    body.AddForce(new Vector3(0f, 0.5f, side).normalized * (force * 0.8f), ForceMode.VelocityChange);
                 }
             }
-            CreateExplosionEffect(ownerPosition, radius, new Color(0.15f, 0.55f, 1f, 0.95f), 0.45f);
+            // Visible wave: three expanding rings and a translucent fill.
+            StartCoroutine(AnimateShockwave(ownerPosition, radius, new Color(0.2f, 0.62f, 1f, 1f),
+                new Color(0.75f, 0.92f, 1f, 1f), 0.55f, 3, 0));
+            ShowFloatingText(ownerPosition + Vector3.up * 1.9f, "ИМПУЛЬС", new Color(0.55f, 0.82f, 1f, 1f), 1.2f);
             Logger.LogInfo("Blue impulse pushed " + count + " nearby enemies and " + pushedBodies.Count + " physical objects.");
+        }
+
+        // VelocityChange ignores mass, so every limb of a ragdoll moves together.
+        private static void ApplyVelocityChangeAll(Controller target, Vector3 delta)
+        {
+            if (target == null) return;
+            Rigidbody[] bodies = target.GetComponentsInChildren<Rigidbody>();
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                if (bodies[i] == null || bodies[i].isKinematic) continue;
+                bodies[i].AddForce(delta, ForceMode.VelocityChange);
+            }
+        }
+
+        // Briefly pauses an enemy's own steering so a knocked-back enemy actually flies
+        // instead of immediately walking back; never shortens a longer root/stun.
+        private static void StunEnemy(Controller target, float seconds)
+        {
+            if (target == null) return;
+            float until;
+            float desired = Time.unscaledTime + seconds;
+            if (EnemyAIPatches.RootedUntil.TryGetValue(target.GetInstanceID(), out until) && until > desired) return;
+            EnemyAIPatches.RootedUntil[target.GetInstanceID()] = desired;
         }
 
         private IEnumerator DestructionBeam(Controller owner, Vector3 direction)
@@ -3285,9 +3701,13 @@ namespace StickFightFortDefense
                         }
                     }
                     CharacterInformation targetInfo = target.GetComponent<CharacterInformation>();
-                    if (targetInfo != null && targetInfo.mainRig != null)
+                    if (targetInfo != null && !targetInfo.isDead)
                     {
-                        targetInfo.mainRig.AddForce(direction * force, ForceMode.Impulse);
+                        // Blast knockback: whole-ragdoll velocity change, upward-biased.
+                        Vector3 blast = new Vector3(0f, Mathf.Max(0.5f, direction.y), direction.z);
+                        if (Mathf.Abs(blast.z) < 0.2f) blast.z = GetFacingDirection(player);
+                        ApplyVelocityChangeAll(target, blast.normalized * force);
+                        StunEnemy(target, 0.7f);
                     }
                     Logger.LogInfo("Orange detonation hit enemy " + target.GetInstanceID() + " for " + damage.ToString("F1") + "; remaining health " + health.health.ToString("F1") + ".");
                 }
@@ -3419,6 +3839,7 @@ namespace StickFightFortDefense
         {
             EnemyAIPatches.PurgeTaggedEnemies();
             abilityReadyAt.Clear();
+            ClearAbilityObjects();
             foreach (GameObject rootVisual in rootVisuals.Values)
                 if (rootVisual != null) Destroy(rootVisual);
             rootVisuals.Clear();

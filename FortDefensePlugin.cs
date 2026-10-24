@@ -10,7 +10,7 @@ using UnityEngine.UI;
 
 namespace StickFightFortDefense
 {
-[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.8.96")]
+[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.8.97")]
     public sealed class Plugin : BaseUnityPlugin
     {
         private const int AbilityColorCount = 19;
@@ -2765,8 +2765,17 @@ namespace StickFightFortDefense
                     {
                         float before = health.health;
                         health.TakeDamage(damage, owner, DamageType.LocalDamage, false, hit.point, Vector3.zero);
-                        if (Mathf.Approximately(health.health, before))
-                            health.health = Mathf.Max(0f, before - damage);
+                        float nativeHealth = health.health;
+                        // HealthHandler scales LocalDamage (the native BEAM path
+                        // applies only a fraction of the requested value). This
+                        // ability is a single 30 HP shot, so enforce its stated
+                        // damage after allowing the game's damage hooks to run.
+                        health.health = Mathf.Max(0f, before - damage);
+                        Logger.LogInfo("Purple BEAM damage applied to enemy " + target.GetInstanceID() +
+                            ": requested=" + damage.ToString("F0") + ", native=" +
+                            Mathf.Max(0f, before - nativeHealth).ToString("F1") + ", final=" +
+                            Mathf.Max(0f, before - health.health).ToString("F1") + ", HP=" +
+                            before.ToString("F1") + "->" + health.health.ToString("F1") + ".");
                         if (health.health <= 0f)
                         {
                             health.ForcedDie();
@@ -2790,25 +2799,43 @@ namespace StickFightFortDefense
             }
 
             GameObject beamObject = new GameObject("FortDefense_PurpleBeam");
-            LineRenderer beam = beamObject.AddComponent<LineRenderer>();
-            beam.useWorldSpace = true;
-            beam.loop = false;
-            beam.positionCount = 2;
             EnsureGameBeamStyle();
-            beam.startWidth = purpleBeamStartWidth;
-            beam.endWidth = purpleBeamEndWidth;
-            beam.startColor = new Color(0.92f, 0.55f, 1f, 1f);
-            beam.endColor = new Color(0.58f, 0.04f, 1f, 0.95f);
-            beam.textureMode = LineTextureMode.Stretch;
-            beam.numCapVertices = 4;
-            beam.sortingOrder = 400;
-            beam.sharedMaterial = GetPurpleBeamMaterial();
-            beam.SetPosition(0, origin);
-            beam.SetPosition(1, beamEnd);
+            Material material = GetPurpleBeamMaterial();
+            CreateBeamLayer(beamObject.transform, material,
+                Mathf.Max(0.78f, purpleBeamStartWidth * 2.2f), Mathf.Max(0.48f, purpleBeamEndWidth * 2.2f),
+                new Color(0.63f, 0.02f, 1f, 0.34f), new Color(0.38f, 0.01f, 0.9f, 0.08f), origin, beamEnd);
+            CreateBeamLayer(beamObject.transform, material,
+                Mathf.Max(0.34f, purpleBeamStartWidth * 1.05f), Mathf.Max(0.2f, purpleBeamEndWidth * 1.05f),
+                new Color(0.95f, 0.12f, 1f, 0.9f), new Color(0.7f, 0.08f, 1f, 0.7f), origin, beamEnd);
+            CreateBeamLayer(beamObject.transform, material,
+                Mathf.Max(0.11f, purpleBeamStartWidth * 0.38f), Mathf.Max(0.07f, purpleBeamEndWidth * 0.38f),
+                new Color(1f, 0.92f, 1f, 1f), new Color(0.86f, 0.55f, 1f, 0.98f), origin, beamEnd);
+            CreateExplosionEffect(beamEnd, 0.8f, new Color(0.85f, 0.25f, 1f, 0.95f), 0.22f);
             Logger.LogInfo("Purple BEAM shot hit " + damagedEnemies + " enemies; damage=" + damage.ToString("F0") +
                 ", beam length=" + Vector3.Distance(origin, beamEnd).ToString("F1") + ", direction=" + direction.ToString("F2") + ".");
             yield return new WaitForSecondsRealtime(purpleBeamLifetime);
             if (beamObject != null) Destroy(beamObject);
+        }
+
+        private void CreateBeamLayer(Transform parent, Material material, float startWidth, float endWidth,
+            Color startColor, Color endColor, Vector3 origin, Vector3 end)
+        {
+            GameObject layerObject = new GameObject("BeamLayer");
+            layerObject.transform.SetParent(parent, false);
+            LineRenderer line = layerObject.AddComponent<LineRenderer>();
+            line.useWorldSpace = true;
+            line.loop = false;
+            line.positionCount = 2;
+            line.startWidth = startWidth;
+            line.endWidth = endWidth;
+            line.startColor = startColor;
+            line.endColor = endColor;
+            line.textureMode = LineTextureMode.Stretch;
+            line.numCapVertices = 6;
+            line.sortingOrder = 400;
+            line.sharedMaterial = material;
+            line.SetPosition(0, origin);
+            line.SetPosition(1, end);
         }
 
         private static Controller GetControllerFromCollider(Collider collider)
@@ -3123,7 +3150,9 @@ namespace StickFightFortDefense
                 beamMaterial.mainTexture = GetPurpleBeamTexture();
                 Logger.LogWarning("BEAM material was unavailable; using the generated beam fallback.");
             }
-            beamMaterial.color = new Color(0.78f, 0.18f, 1f, 1f);
+            // Let the three renderer layers provide the color: the outer glow,
+            // saturated violet body, and near-white core stay distinct.
+            beamMaterial.color = Color.white;
             beamMaterial.renderQueue = 3000;
             return beamMaterial;
         }
@@ -4743,14 +4772,17 @@ namespace StickFightFortDefense
             float after = (float)PunchCooldownField.GetValue(__instance);
             float nativeDecrease = __state - after;
             // Attack() subtracts its randomized recovery from this accumulating timer.
-            // Add back the requested fraction: scaling `after` fails when the native
-            // attack has brought the timer exactly to zero.
             if (nativeDecrease <= 0.001f) return;
-            float accelerated = after + nativeDecrease * (1f - multiplier);
+            // Fighting.Update adds elapsed time to punchCD; Fighting.Attack then
+            // subtracts the randomized recovery. Subtracting a larger amount is
+            // what makes the next punch available sooner. Scale that subtraction
+            // by the desired interval ratio (0.50 means twice the attack rate).
+            float accelerated = after - nativeDecrease * ((1f / multiplier) - 1f);
             PunchCooldownField.SetValue(__instance, accelerated);
             Plugin.LogNavigation("Player " + (owner.playerID + 1) + " punch interval step scaled by " +
                 multiplier.ToString("F2") + ": punchCD " + after.ToString("F2") + " -> " + accelerated.ToString("F2") +
-                " (native recovery " + nativeDecrease.ToString("F2") + ").");
+                " (native recovery " + nativeDecrease.ToString("F2") + ", accelerated recovery=" +
+                (nativeDecrease / multiplier).ToString("F2") + ").");
         }
 
         private static void UpdateNavigationRoute(AI ai, Controller controller, Rigidbody player, CharacterInformation playerInfo)

@@ -13,14 +13,14 @@ An experimental local-co-op PvE mod prototype for **Stick Fight: The Game**. It 
 
 This is not a finished or balanced release. In particular, ability visuals/behavior, enemy navigation, combat damage, and co-op edge cases may be incomplete or broken. See [MODDING_PLAN.md](MODDING_PLAN.md) for intended scope.
 
-## Latest source update: 0.8.96
+## Latest source update: 0.8.97
 
-- Red Rage and Fast Hands now scale the game's actual punch recovery subtraction, instead of multiplying a timer value that may already be zero.
+- Red Rage and Fast Hands now scale the game's actual punch recovery subtraction in the correct direction: Red Rage doubles the unarmed punch rate for five seconds.
 - Rooted enemies skip both the game's AI update and the mod's post-update attack/jump logic; their dynamic body parts are held still for the effect duration.
 - Ability positions and movement impulses prefer the live torso rigidbody, with the game's main rig as a fallback.
-- The purple shot searches for the stock BEAM trail or line material, passes through enemies and moving props, and stops at static arena geometry.
+- The purple shot enforces its 30 HP damage after native scaling, passes through enemies and moving props, and stops at static arena geometry. Its visual uses layered violet glow and a bright core because the BEAM prefab is not exposed in loaded resources.
 
-The 0.8.96 source compiles against the game's .NET 3.5-era references, BepInEx and Unity assemblies. This update has **not** been launched for a live gameplay check yet; BEAM prefab matching and movement/ability behavior still need in-game verification.
+The 0.8.97 source compiles against the game's .NET 3.5-era references, BepInEx and Unity assemblies. This update has not been launched for live gameplay verification; the user will check punch cadence, damage and visuals in game.
 
 ## Requirements
 

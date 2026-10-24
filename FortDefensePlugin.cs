@@ -260,6 +260,10 @@ namespace StickFightFortDefense
                 typeof(Fighting).GetMethod("Attack", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic),
                 "Fighting.Attack punch cadence", "CapturePunchCooldown", "ApplyPunchCooldownRate");
             PatchSafe(harmony,
+                typeof(Fighting).GetMethod("Update", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic),
+                "Fighting.Update punch timer boost", null, "AcceleratePunchTimer");
+            PatchKnockbackGuard(harmony);
+            PatchSafe(harmony,
                 typeof(ProjectileCollision).GetMethod("HitObject", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic),
                 "ProjectileCollision.HitObject", "PrepareProjectileHit", "RestoreProjectileDamage");
             PatchSafe(harmony,
@@ -272,6 +276,41 @@ namespace StickFightFortDefense
                 typeof(RemoveAI).GetMethod("Start", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic),
                 "RemoveAI.Start", "KeepEnemyCorpse", null);
             Logger.LogInfo("Installed enemy AI, marked solid-surface spawns, local enemy punch damage, co-op downed/revive state, defeat-to-lobby, health, projectile critical, map cleanup, snake weapon, and corpse patches.");
+        }
+
+        private void PatchKnockbackGuard(Harmony harmony)
+        {
+            try
+            {
+                Type punchType = typeof(Controller).Assembly.GetType("PunchForce");
+                if (System.Object.ReferenceEquals(punchType, null))
+                {
+                    Logger.LogWarning("PunchForce type not found; knockback is limited by the velocity clamp only.");
+                    return;
+                }
+                MethodInfo[] methods = punchType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                int patched = 0;
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    ParameterInfo[] parameters = methods[i].GetParameters();
+                    bool takesContact = false;
+                    for (int j = 0; j < parameters.Length; j++)
+                        if (parameters[j].ParameterType == typeof(Collision) || parameters[j].ParameterType == typeof(Collider)) takesContact = true;
+                    if (!takesContact || methods[i].IsAbstract || methods[i].ContainsGenericParameters) continue;
+                    Type patchType = typeof(EnemyAIPatches);
+                    harmony.Patch(methods[i],
+                        new HarmonyMethod(patchType.GetMethod("BeginKnockbackGuard", BindingFlags.Static | BindingFlags.Public)),
+                        new HarmonyMethod(patchType.GetMethod("EndKnockbackGuard", BindingFlags.Static | BindingFlags.Public)),
+                        null, null, null);
+                    patched++;
+                    Logger.LogInfo("Patched PunchForce." + methods[i].Name + " knockback guard.");
+                }
+                if (patched == 0) Logger.LogWarning("PunchForce has no contact methods to guard; knockback is limited by the velocity clamp only.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("Could not patch PunchForce knockback guard: " + ex);
+            }
         }
 
         private void PatchSafe(Harmony harmony, MethodBase original, string label, string prefixName, string postfixName)
@@ -300,6 +339,9 @@ namespace StickFightFortDefense
             UpdateRageEffects();
             UpdateAbilityEffects();
             UpdateRootedEffects();
+            UpdateCharacterFlashes();
+            UpdateKnockbackClamp();
+            UpdateAirStepMarkers();
             UpdateRunPerks();
             UpdateGoldCrushExpiry();
             UpdateParasiticSeeds();
@@ -1518,8 +1560,10 @@ namespace StickFightFortDefense
             {
                 label = "Red rage";
                 rageUntil[player.GetInstanceID()] = Time.unscaledTime + 5f;
-                Logger.LogInfo("Red rage: punch cooldown reduced by 100% for five seconds; enemy punch knockback suppressed.");
-                ShowTimedAbilityEffect(player, new Color(1f, 0.025f, 0.015f, 1f), 5f, "ЯРОСТЬ", 1.7f, 0.3f);
+                Logger.LogInfo("Red rage: time between punches halved and knockback blocked for five seconds.");
+                ShowTimedAbilityEffect(player, new Color(1f, 0.1f, 0.05f, 1f), 5f, "ЯРОСТЬ", 1.7f, 0.3f);
+                FlashCharacter(player, new Color(1f, 0.92f, 0.55f, 1f), 5f, 2.5f);
+                CreateExplosionEffect(GetActorPosition(player), 2.6f, new Color(1f, 0.15f, 0.05f, 1f), 0.45f);
             }
             else if (ability == 1)
             {
@@ -1530,19 +1574,20 @@ namespace StickFightFortDefense
             {
                 label = "Green roots";
                 RootNearbyEnemies(player, 5f, 3f);
-                ShowTimedAbilityEffect(player, new Color(0.2f, 1f, 0.2f, 0.9f), 3f, "Roots", 5f);
+                CreateExplosionEffect(GetActorPosition(player), 5f, new Color(0.25f, 0.9f, 0.2f, 0.9f), 0.6f);
             }
             else if (ability == 3)
             {
                 label = "Purple destruction beam";
                 Vector3 origin = info != null && info.mainRig != null ? info.mainRig.position : player.transform.position;
-                Vector3 aim = FindMouseAimDirection(player, origin);
+                // Keyboard player aims with the mouse; other players use the nearest visible enemy.
+                Vector3 aim = player.playerID == 0 ? FindMouseAimDirection(player, origin) : Vector3.zero;
                 StartCoroutine(DestructionBeam(player, aim));
             }
             else if (ability == 4)
             {
                 label = "Blue impulse";
-                PushNearbyEnemies(player, 7f, 9f);
+                PushNearbyEnemies(player, 7f, 13f);
             }
             else if (ability == 5)
             {
@@ -1556,23 +1601,13 @@ namespace StickFightFortDefense
             {
                 label = "Orange detonation";
                 DamageNearbyEnemies(player, 5f, 14f, 9f);
-                CreateExplosionEffect(GetActorPosition(player), 5f, new Color(1f, 0.35f, 0.03f, 0.9f), 0.65f);
+                CreateExplosionEffect(GetActorPosition(player), 5f, new Color(1f, 0.35f, 0.03f, 1f), 0.7f);
+                CreateExplosionEffect(GetActorPosition(player), 2.6f, new Color(1f, 0.9f, 0.3f, 1f), 0.4f);
             }
             else if (ability == 7)
             {
                 label = "Cyan air step";
-                if (info.mainRig != null)
-                {
-                    float direction = player.LookRotation.x < 0f ? -1f : 1f;
-                    Vector3 velocity = info.mainRig.velocity;
-                    velocity.y = Mathf.Max(velocity.y, 8f);
-                    velocity.z = direction * Mathf.Max(Mathf.Abs(velocity.z), 4f);
-                    info.mainRig.velocity = velocity;
-                    CreateExplosionEffect(info.mainRig.position, 1.8f, new Color(0.1f, 0.9f, 1f, 0.85f), 0.35f);
-                    status = "Голубой воздушный шаг активирован — дополнительный прыжок!";
-                    statusUntil = Time.unscaledTime + 2f;
-                    Logger.LogInfo("Cyan air step set vertical velocity to " + velocity.y.ToString("F1") + " for local player " + player.playerID + ".");
-                }
+                ActivateAirStep(player, info);
             }
             else if (ability == 8)
             {
@@ -1587,7 +1622,7 @@ namespace StickFightFortDefense
             else if (ability == 10)
             {
                 label = "Snow ice grip";
-                RootNearbyEnemies(player, 5.5f, 2f);
+                RootNearbyEnemies(player, 5.5f, 2f, true);
             }
             else
             {
@@ -2178,25 +2213,37 @@ namespace StickFightFortDefense
 
         private void UpdateAbilityEffects()
         {
-            if (abilityVisuals.Count > 0)
+            if (abilityVisuals.Count == 0) return;
+            Camera camera = Camera.main;
+            foreach (KeyValuePair<int, GameObject> item in abilityVisuals)
             {
-                foreach (KeyValuePair<int, GameObject> item in abilityVisuals)
+                GameObject effect = item.Value;
+                if (effect == null) continue;
+                Controller owner;
+                if (abilityVisualOwners.TryGetValue(item.Key, out owner) && owner != null)
+                    effect.transform.position = GetActorPosition(owner);
+                float pulse = 0.85f + Mathf.Sin(Time.unscaledTime * 9f) * 0.25f;
+                LineRenderer line = effect.GetComponent<LineRenderer>();
+                if (line != null)
                 {
-                    GameObject effect = item.Value;
-                    if (effect == null) continue;
-                    Controller owner;
-                    if (abilityVisualOwners.TryGetValue(item.Key, out owner) && owner != null)
-                        effect.transform.position = GetActorPosition(owner);
-                    LineRenderer line = effect.GetComponent<LineRenderer>();
-                    if (line != null)
-                    {
-                        float pulse = 0.85f + Mathf.Sin(Time.unscaledTime * 9f) * 0.25f;
-                        float baseWidth;
-                        if (!abilityVisualBaseWidths.TryGetValue(item.Key, out baseWidth)) baseWidth = 0.12f;
-                        line.startWidth = baseWidth * pulse;
-                        line.endWidth = baseWidth * 0.65f * pulse;
-                    }
+                    float baseWidth;
+                    if (!abilityVisualBaseWidths.TryGetValue(item.Key, out baseWidth)) baseWidth = 0.12f;
+                    line.startWidth = baseWidth * pulse;
+                    line.endWidth = baseWidth * 0.65f * pulse;
                 }
+                Transform labelTransform = effect.transform.Find("Label");
+                if (labelTransform != null)
+                {
+                    TextMesh label = labelTransform.GetComponent<TextMesh>();
+                    string title;
+                    float until;
+                    if (label != null && abilityVisualTitles.TryGetValue(item.Key, out title) &&
+                        abilityVisualUntil.TryGetValue(item.Key, out until))
+                        label.text = title + " " + Mathf.Max(0f, until - Time.unscaledTime).ToString("F1") + "с";
+                    if (camera != null) labelTransform.forward = camera.transform.forward;
+                }
+                Transform fill = effect.transform.Find("Fill");
+                if (fill != null) SetSectorAlpha(fill.gameObject, 0.2f + 0.12f * pulse, 0.05f + 0.06f * pulse);
             }
         }
 
@@ -2395,49 +2442,66 @@ namespace StickFightFortDefense
             }
         }
 
-        private void ShowTimedAbilityEffect(Controller owner, Color color, float duration, string title, float radius = 1.2f, float width = 0.12f)
+        // ------------------------------------------------------------------
+        // Ability visuals. Every effect uses one always-on-top material so the
+        // map geometry between the camera and the gameplay plane cannot hide it.
+        // ------------------------------------------------------------------
+        private Material overlayMaterialTemplate;
+        private bool overlayShaderLogged;
+        private readonly Dictionary<int, string> abilityVisualTitles = new Dictionary<int, string>();
+
+        private Material GetOverlayMaterial(Color tint)
         {
-            if (owner == null) return;
-            int id = owner.GetInstanceID();
-            GameObject old;
-            if (abilityVisuals.TryGetValue(id, out old) && old != null) Destroy(old);
-            GameObject ring = CreateEffectRing("FortDefense_" + title, color, radius, width);
-            ring.transform.position = GetActorPosition(owner);
-            abilityVisuals[id] = ring;
-            abilityVisualOwners[id] = owner;
-            abilityVisualUntil[id] = Time.unscaledTime + duration;
-            abilityVisualBaseWidths[id] = width;
-            StartCoroutine(RemoveEffectAfter(id, ring, duration));
+            if (overlayMaterialTemplate == null)
+            {
+                Shader shader = Shader.Find("GUI/Text Shader");
+                if (shader == null) shader = Shader.Find("Sprites/Default");
+                if (shader == null) shader = Shader.Find("Unlit/Transparent");
+                if (shader == null) shader = Shader.Find("Unlit/Color");
+                if (shader == null)
+                {
+                    Logger.LogError("No usable shader was found for ability visuals.");
+                    return null;
+                }
+                overlayMaterialTemplate = new Material(shader);
+                overlayMaterialTemplate.name = "FortDefense_OverlayTemplate";
+                overlayMaterialTemplate.color = Color.white;
+                if (!overlayShaderLogged)
+                {
+                    overlayShaderLogged = true;
+                    Logger.LogInfo("Ability visuals use shader " + shader.name + ".");
+                }
+            }
+            if (overlayMaterialTemplate.shader != null && overlayMaterialTemplate.shader.name == "Unlit/Color")
+            {
+                Material colored = new Material(overlayMaterialTemplate);
+                colored.color = tint;
+                return colored;
+            }
+            return overlayMaterialTemplate;
         }
 
-        private IEnumerator RemoveEffectAfter(int id, GameObject effect, float duration)
+        private LineRenderer SetupOverlayLine(GameObject obj, Color startColor, Color endColor, float startWidth, float endWidth,
+            int points, bool loop, bool worldSpace)
         {
-            yield return new WaitForSecondsRealtime(duration);
-            if (effect != null) Destroy(effect);
-            GameObject current;
-            if (abilityVisuals.TryGetValue(id, out current) && current == effect)
-            {
-                abilityVisuals.Remove(id);
-                abilityVisualOwners.Remove(id);
-                abilityVisualUntil.Remove(id);
-                abilityVisualBaseWidths.Remove(id);
-            }
+            LineRenderer line = obj.AddComponent<LineRenderer>();
+            line.useWorldSpace = worldSpace;
+            line.loop = loop;
+            line.positionCount = points;
+            line.startWidth = startWidth;
+            line.endWidth = endWidth;
+            line.startColor = startColor;
+            line.endColor = endColor;
+            line.numCapVertices = 4;
+            line.sharedMaterial = GetOverlayMaterial(startColor);
+            line.sortingOrder = 500;
+            return line;
         }
 
         private GameObject CreateEffectRing(string name, Color color, float radius, float width)
         {
             GameObject obj = new GameObject(name);
-            LineRenderer line = obj.AddComponent<LineRenderer>();
-            line.useWorldSpace = false;
-            line.loop = true;
-            line.positionCount = 49;
-            line.startWidth = width;
-            line.endWidth = width;
-            line.startColor = color;
-            line.endColor = new Color(color.r, color.g, color.b, 0.15f);
-            line.numCapVertices = 3;
-            line.material = new Material(Shader.Find("Sprites/Default"));
-            line.material.color = color;
+            LineRenderer line = SetupOverlayLine(obj, color, color, width, width, 49, true, false);
             for (int i = 0; i < 49; i++)
             {
                 float angle = (float)i / 48f * Mathf.PI * 2f;
@@ -2446,66 +2510,401 @@ namespace StickFightFortDefense
             return obj;
         }
 
+        // A filled fan in the gameplay (Y/Z) plane. Angles are measured from +Z toward +Y.
+        private GameObject CreateEffectSector(string name, Color color, float radius, float startDegrees, float endDegrees,
+            int segments, float edgeAlpha)
+        {
+            GameObject obj = new GameObject(name);
+            MeshFilter filter = obj.AddComponent<MeshFilter>();
+            MeshRenderer meshRenderer = obj.AddComponent<MeshRenderer>();
+            Mesh mesh = new Mesh();
+            mesh.name = name + "_Mesh";
+            Vector3[] vertices = new Vector3[segments + 2];
+            Color[] colors = new Color[segments + 2];
+            int[] triangles = new int[segments * 6];
+            vertices[0] = Vector3.zero;
+            colors[0] = color;
+            Color edge = new Color(color.r, color.g, color.b, color.a * edgeAlpha);
+            for (int i = 0; i <= segments; i++)
+            {
+                float angle = Mathf.Lerp(startDegrees, endDegrees, (float)i / (float)segments) * Mathf.Deg2Rad;
+                vertices[i + 1] = new Vector3(0f, Mathf.Sin(angle) * radius, Mathf.Cos(angle) * radius);
+                colors[i + 1] = edge;
+            }
+            for (int i = 0; i < segments; i++)
+            {
+                // Both windings so the fan is visible from either side of the map.
+                triangles[i * 6] = 0;
+                triangles[i * 6 + 1] = i + 1;
+                triangles[i * 6 + 2] = i + 2;
+                triangles[i * 6 + 3] = 0;
+                triangles[i * 6 + 4] = i + 2;
+                triangles[i * 6 + 5] = i + 1;
+            }
+            mesh.vertices = vertices;
+            mesh.colors = colors;
+            mesh.triangles = triangles;
+            mesh.RecalculateBounds();
+            filter.sharedMesh = mesh;
+            meshRenderer.sharedMaterial = GetOverlayMaterial(color);
+            meshRenderer.sortingOrder = 490;
+            return obj;
+        }
+
+        private static void SetSectorAlpha(GameObject sector, float centerAlpha, float edgeAlpha)
+        {
+            MeshFilter filter = sector == null ? null : sector.GetComponent<MeshFilter>();
+            if (filter == null || filter.sharedMesh == null) return;
+            Color[] colors = filter.sharedMesh.colors;
+            if (colors == null || colors.Length == 0) return;
+            for (int i = 0; i < colors.Length; i++)
+            {
+                Color c = colors[i];
+                c.a = i == 0 ? centerAlpha : edgeAlpha;
+                colors[i] = c;
+            }
+            filter.sharedMesh.colors = colors;
+        }
+
+        private static void DestroyEffect(GameObject obj)
+        {
+            if (obj == null) return;
+            MeshFilter[] filters = obj.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < filters.Length; i++)
+                if (filters[i] != null && filters[i].sharedMesh != null) Destroy(filters[i].sharedMesh);
+            Destroy(obj);
+        }
+
+        private TextMesh CreateEffectLabel(Transform parent, string text, Color color, float localHeight)
+        {
+            GameObject labelObject = new GameObject("Label");
+            labelObject.transform.SetParent(parent, false);
+            labelObject.transform.localPosition = new Vector3(0f, localHeight, 0f);
+            TextMesh mesh = labelObject.AddComponent<TextMesh>();
+            mesh.text = text;
+            mesh.color = color;
+            mesh.fontSize = 48;
+            mesh.characterSize = 0.085f;
+            mesh.anchor = TextAnchor.MiddleCenter;
+            mesh.alignment = TextAlignment.Center;
+            mesh.fontStyle = FontStyle.Bold;
+            MeshRenderer labelRenderer = labelObject.GetComponent<MeshRenderer>();
+            if (labelRenderer != null) labelRenderer.sortingOrder = 600;
+            return mesh;
+        }
+
+        // Direction (-1 / +1 along Z) the player is facing. Keyboard players face the mouse.
+        private float GetFacingSign(Controller player)
+        {
+            if (player == null) return 1f;
+            if (player.playerID == 0)
+            {
+                Camera camera = Camera.main;
+                if (camera != null)
+                {
+                    Vector3 actor = GetActorPosition(player);
+                    Ray ray = camera.ScreenPointToRay(Input.mousePosition);
+                    Plane gameplayPlane = new Plane(Vector3.right, new Vector3(actor.x, 0f, 0f));
+                    float distance;
+                    if (gameplayPlane.Raycast(ray, out distance))
+                    {
+                        float dz = ray.GetPoint(distance).z - actor.z;
+                        if (Mathf.Abs(dz) > 0.25f) return dz < 0f ? -1f : 1f;
+                    }
+                }
+            }
+            return player.LookRotation.x < 0f ? -1f : 1f;
+        }
+
+        private void ShowTimedAbilityEffect(Controller owner, Color color, float duration, string title, float radius = 1.2f,
+            float width = 0.12f, bool fill = false)
+        {
+            if (owner == null) return;
+            int id = owner.GetInstanceID();
+            GameObject old;
+            if (abilityVisuals.TryGetValue(id, out old) && old != null) DestroyEffect(old);
+            GameObject ring = CreateEffectRing("FortDefense_" + title, color, radius, width);
+            ring.transform.position = GetActorPosition(owner);
+            if (fill)
+            {
+                GameObject disc = CreateEffectSector("Fill", new Color(color.r, color.g, color.b, 0.28f), radius, 0f, 360f, 40, 0.35f);
+                disc.transform.SetParent(ring.transform, false);
+            }
+            Color labelColor = Color.Lerp(color, Color.white, 0.45f);
+            labelColor.a = 1f;
+            CreateEffectLabel(ring.transform, title, labelColor, 2.1f);
+            abilityVisuals[id] = ring;
+            abilityVisualOwners[id] = owner;
+            abilityVisualUntil[id] = Time.unscaledTime + duration;
+            abilityVisualBaseWidths[id] = width;
+            abilityVisualTitles[id] = title;
+            StartCoroutine(RemoveEffectAfter(id, ring, duration));
+        }
+
+        private IEnumerator RemoveEffectAfter(int id, GameObject effect, float duration)
+        {
+            yield return new WaitForSecondsRealtime(duration);
+            GameObject current;
+            bool stillCurrent = abilityVisuals.TryGetValue(id, out current) && current == effect;
+            DestroyEffect(effect);
+            if (stillCurrent)
+            {
+                abilityVisuals.Remove(id);
+                abilityVisualOwners.Remove(id);
+                abilityVisualUntil.Remove(id);
+                abilityVisualBaseWidths.Remove(id);
+                abilityVisualTitles.Remove(id);
+            }
+        }
+
+        // Expanding shockwave: ring + translucent fill + radial sparks.
         private void CreateExplosionEffect(Vector3 center, float radius, Color color, float duration)
         {
-            GameObject ring = CreateEffectRing("FortDefense_AbilityPulse", color, 0.1f, 0.18f);
-            ring.transform.position = center;
-            StartCoroutine(AnimateExplosion(ring, radius, duration));
+            StartCoroutine(AnimateBlast(center, radius, color, duration));
         }
 
-        private IEnumerator AnimateExplosion(GameObject ring, float radius, float duration)
+        private IEnumerator AnimateBlast(Vector3 center, float radius, Color color, float duration)
         {
+            GameObject root = new GameObject("FortDefense_Blast");
+            root.transform.position = center;
+            GameObject ring = CreateEffectRing("Ring", color, 1f, 0.22f);
+            ring.transform.SetParent(root.transform, false);
+            GameObject disc = CreateEffectSector("Fill", new Color(color.r, color.g, color.b, 0.4f), 1f, 0f, 360f, 36, 0.12f);
+            disc.transform.SetParent(root.transform, false);
+            LineRenderer ringLine = ring.GetComponent<LineRenderer>();
+            const int spokeCount = 12;
+            LineRenderer[] spokes = new LineRenderer[spokeCount];
+            for (int i = 0; i < spokeCount; i++)
+            {
+                GameObject spokeObject = new GameObject("Spoke");
+                spokeObject.transform.SetParent(root.transform, false);
+                spokes[i] = SetupOverlayLine(spokeObject, color, new Color(color.r, color.g, color.b, 0f), 0.16f, 0.02f, 2, false, true);
+            }
             float started = Time.unscaledTime;
-            LineRenderer line = ring == null ? null : ring.GetComponent<LineRenderer>();
-            while (ring != null && Time.unscaledTime - started < duration)
+            while (root != null && Time.unscaledTime - started < duration)
             {
                 float t = Mathf.Clamp01((Time.unscaledTime - started) / duration);
-                float r = Mathf.Lerp(0.1f, radius, t);
-                for (int i = 0; i < 49; i++)
+                float eased = 1f - (1f - t) * (1f - t);
+                float r = Mathf.Max(0.1f, radius * eased);
+                ring.transform.localScale = new Vector3(1f, r, r);
+                disc.transform.localScale = new Vector3(1f, r, r);
+                SetSectorAlpha(disc, 0.45f * (1f - t), 0.12f * (1f - t));
+                Color ringColor = new Color(color.r, color.g, color.b, 1f - t * 0.8f);
+                ringLine.startColor = ringColor;
+                ringLine.endColor = ringColor;
+                for (int i = 0; i < spokeCount; i++)
                 {
-                    float angle = (float)i / 48f * Mathf.PI * 2f;
-                    line.SetPosition(i, new Vector3(0f, Mathf.Sin(angle) * r, Mathf.Cos(angle) * r));
+                    float angle = (float)i / (float)spokeCount * Mathf.PI * 2f + 0.26f;
+                    Vector3 dir = new Vector3(0f, Mathf.Sin(angle), Mathf.Cos(angle));
+                    spokes[i].SetPosition(0, center + dir * (r * 0.55f));
+                    spokes[i].SetPosition(1, center + dir * (r + 0.4f));
                 }
-                line.startColor = new Color(line.startColor.r, line.startColor.g, line.startColor.b, 1f - t);
                 yield return null;
             }
-            if (ring != null) Destroy(ring);
+            DestroyEffect(root);
         }
 
+        // ---- Character flashing (heal / rage feedback) ----
+        private sealed class FlashState
+        {
+            public Controller Player;
+            public Material[] Materials;
+            public Color[] Originals;
+            public Color FlashColor;
+            public float Hz;
+            public float Until;
+        }
+
+        private readonly Dictionary<int, FlashState> characterFlashes = new Dictionary<int, FlashState>();
+
+        private void FlashCharacter(Controller player, Color flashColor, float duration, float hz)
+        {
+            if (player == null) return;
+            int id = player.GetInstanceID();
+            FlashState state;
+            if (!characterFlashes.TryGetValue(id, out state))
+            {
+                List<Material> materials = new List<Material>();
+                Renderer[] renderers = player.GetComponentsInChildren<Renderer>();
+                for (int i = 0; i < renderers.Length; i++)
+                {
+                    Renderer item = renderers[i];
+                    if (item == null || !(item is MeshRenderer || item is SkinnedMeshRenderer) || IsWeaponVisual(item)) continue;
+                    Material material = item.sharedMaterial;
+                    if (material == null || materials.Contains(material) || !material.HasProperty("_Color")) continue;
+                    materials.Add(material);
+                }
+                if (materials.Count == 0) return;
+                state = new FlashState();
+                state.Player = player;
+                state.Materials = materials.ToArray();
+                state.Originals = new Color[state.Materials.Length];
+                for (int i = 0; i < state.Materials.Length; i++) state.Originals[i] = state.Materials[i].color;
+                characterFlashes[id] = state;
+            }
+            state.FlashColor = flashColor;
+            state.Hz = hz;
+            state.Until = Mathf.Max(state.Until, Time.unscaledTime + duration);
+        }
+
+        private void UpdateCharacterFlashes()
+        {
+            if (characterFlashes.Count == 0) return;
+            List<int> finished = null;
+            foreach (KeyValuePair<int, FlashState> item in characterFlashes)
+            {
+                FlashState state = item.Value;
+                bool done = state.Player == null || Time.unscaledTime >= state.Until;
+                float pulse = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * state.Hz * 6.2832f);
+                for (int i = 0; i < state.Materials.Length; i++)
+                {
+                    if (state.Materials[i] == null) continue;
+                    state.Materials[i].color = done ? state.Originals[i] : Color.Lerp(state.Originals[i], state.FlashColor, pulse);
+                }
+                if (done)
+                {
+                    if (finished == null) finished = new List<int>();
+                    finished.Add(item.Key);
+                }
+            }
+            if (finished != null)
+                for (int i = 0; i < finished.Count; i++) characterFlashes.Remove(finished[i]);
+        }
+
+        private void RestoreAllCharacterFlashes()
+        {
+            foreach (KeyValuePair<int, FlashState> item in characterFlashes)
+            {
+                FlashState state = item.Value;
+                for (int i = 0; i < state.Materials.Length; i++)
+                    if (state.Materials[i] != null) state.Materials[i].color = state.Originals[i];
+            }
+            characterFlashes.Clear();
+        }
+
+        // ---- Yellow barrier ----
         private void CreatePlayerBarrier(Controller owner, float duration)
         {
             if (owner == null) return;
             int id = owner.GetInstanceID();
             GameObject old;
-            if (shieldObjects.TryGetValue(id, out old) && old != null) Destroy(old);
-            GameObject barrier = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            barrier.name = "FortDefense_YellowBarrier";
-            barrier.transform.localScale = new Vector3(3.5f, 3.5f, 0.32f);
-            Renderer renderer = barrier.GetComponent<Renderer>();
-            if (renderer != null)
+            if (shieldObjects.TryGetValue(id, out old) && old != null) DestroyEffect(old);
+            float facing = GetFacingSign(owner);
+            GameObject barrier = new GameObject("FortDefense_YellowBarrier");
+            barrier.transform.position = GetActorPosition(owner);
+            // The physical wall: stops enemies and projectiles, lets players through.
+            BoxCollider box = barrier.AddComponent<BoxCollider>();
+            box.size = new Vector3(3.4f, 3.2f, 0.4f);
+            box.center = new Vector3(0f, 0f, facing * 1.45f);
+            Rigidbody body = barrier.AddComponent<Rigidbody>();
+            body.isKinematic = true;
+            body.useGravity = false;
+            IgnoreBarrierCollisions(box);
+            // The visible shield: a translucent fan with a bright rim, in front of the player.
+            Color yellow = new Color(1f, 0.88f, 0.1f, 0.95f);
+            GameObject visual = new GameObject("Visual");
+            visual.transform.SetParent(barrier.transform, false);
+            visual.transform.localScale = new Vector3(1f, 1f, facing);
+            GameObject panel = CreateEffectSector("Panel", new Color(1f, 0.9f, 0.15f, 0.30f), 1.75f, -62f, 62f, 20, 0.45f);
+            panel.transform.SetParent(visual.transform, false);
+            GameObject arc = new GameObject("Arc");
+            arc.transform.SetParent(visual.transform, false);
+            LineRenderer arcLine = SetupOverlayLine(arc, yellow, yellow, 0.16f, 0.16f, 21, false, false);
+            for (int i = 0; i < 21; i++)
             {
-                Material material = new Material(Shader.Find("Legacy Shaders/Transparent/Diffuse"));
-                material.color = new Color(1f, 0.9f, 0.15f, 0.38f);
-                renderer.material = material;
+                float a = Mathf.Lerp(-62f, 62f, (float)i / 20f) * Mathf.Deg2Rad;
+                arcLine.SetPosition(i, new Vector3(0f, Mathf.Sin(a) * 1.75f, Mathf.Cos(a) * 1.75f));
             }
-            Collider collider = barrier.GetComponent<Collider>();
-            if (collider != null) collider.isTrigger = false;
             shieldObjects[id] = barrier;
             StartCoroutine(RemoveBarrierAfter(id, barrier, duration));
         }
 
+        private void IgnoreBarrierCollisions(Collider barrierCollider)
+        {
+            ControllerHandler players = ControllerHandler.Instance;
+            if (players == null || players.players == null) return;
+            for (int i = 0; i < players.players.Count; i++)
+            {
+                Controller candidate = players.players[i];
+                if (candidate == null || candidate.isAI) continue;
+                Collider[] colliders = candidate.GetComponentsInChildren<Collider>(true);
+                for (int j = 0; j < colliders.Length; j++)
+                    if (colliders[j] != null && colliders[j] != barrierCollider)
+                        Physics.IgnoreCollision(barrierCollider, colliders[j], true);
+            }
+        }
+
         private IEnumerator RemoveBarrierAfter(int id, GameObject barrier, float duration)
         {
-            while (barrier != null && Time.unscaledTime < shieldUntil[id])
+            float endAt = Time.unscaledTime + duration;
+            float lastFacing = 0f;
+            while (barrier != null && Time.unscaledTime < endAt)
             {
                 Controller owner = FindPlayerByInstanceId(id);
                 if (owner == null) break;
-                float direction = owner.LookRotation.x < 0f ? -1f : 1f;
-                barrier.transform.position = GetActorPosition(owner) + new Vector3(0f, 0f, direction * 1.25f);
+                barrier.transform.position = GetActorPosition(owner);
+                float facing = GetFacingSign(owner);
+                if (!Mathf.Approximately(facing, lastFacing))
+                {
+                    lastFacing = facing;
+                    BoxCollider box = barrier.GetComponent<BoxCollider>();
+                    if (box != null) box.center = new Vector3(0f, 0f, facing * 1.45f);
+                    Transform visual = barrier.transform.Find("Visual");
+                    if (visual != null) visual.localScale = new Vector3(1f, 1f, facing);
+                }
                 yield return null;
             }
-            if (barrier != null) Destroy(barrier);
-            shieldObjects.Remove(id);
+            GameObject current;
+            bool stillCurrent = shieldObjects.TryGetValue(id, out current) && current == barrier;
+            DestroyEffect(barrier);
+            if (stillCurrent) shieldObjects.Remove(id);
+        }
+
+        // ---- Cyan "ready" marker above the head ----
+        private readonly Dictionary<int, GameObject> airStepMarkers = new Dictionary<int, GameObject>();
+
+        private void UpdateAirStepMarkers()
+        {
+            ControllerHandler players = ControllerHandler.Instance;
+            HashSet<int> keep = new HashSet<int>();
+            if (modeStarted && players != null && players.players != null)
+            {
+                for (int i = 0; i < players.players.Count; i++)
+                {
+                    Controller player = players.players[i];
+                    CharacterInformation info = player == null ? null : player.GetComponent<CharacterInformation>();
+                    if (player == null || player.isAI || info == null || info.isDead) continue;
+                    if (GetPlayerAbilityIndex(player, info) != 7) continue;
+                    float readyAt;
+                    if (abilityReadyAt.TryGetValue(player.playerID, out readyAt) && Time.unscaledTime < readyAt) continue;
+                    int id = player.GetInstanceID();
+                    keep.Add(id);
+                    GameObject marker;
+                    if (!airStepMarkers.TryGetValue(id, out marker) || marker == null)
+                    {
+                        Color cyan = new Color(0.1f, 0.95f, 1f, 1f);
+                        marker = new GameObject("FortDefense_AirStepReady");
+                        SetupOverlayLine(marker, cyan, cyan, 0.11f, 0.11f, 3, false, true);
+                        airStepMarkers[id] = marker;
+                    }
+                    LineRenderer line = marker.GetComponent<LineRenderer>();
+                    Vector3 center = GetActorPosition(player);
+                    float y = center.y + 1.8f + Mathf.Sin(Time.unscaledTime * 6f) * 0.09f;
+                    line.SetPosition(0, new Vector3(center.x, y, center.z - 0.3f));
+                    line.SetPosition(1, new Vector3(center.x, y + 0.28f, center.z));
+                    line.SetPosition(2, new Vector3(center.x, y, center.z + 0.3f));
+                }
+            }
+            if (airStepMarkers.Count == 0) return;
+            List<int> stale = new List<int>();
+            foreach (KeyValuePair<int, GameObject> item in airStepMarkers)
+                if (!keep.Contains(item.Key)) stale.Add(item.Key);
+            for (int i = 0; i < stale.Count; i++)
+            {
+                GameObject marker = airStepMarkers[stale[i]];
+                if (marker != null) Destroy(marker);
+                airStepMarkers.Remove(stale[i]);
+            }
         }
 
         private Controller FindPlayerByInstanceId(int id)
@@ -2521,7 +2920,7 @@ namespace StickFightFortDefense
         {
             float end = Time.unscaledTime + duration;
             float restored = 0f;
-            ShowTimedAbilityEffect(owner, new Color(1f, 0.22f, 0.7f, 0.95f), duration, "HealingAura", radius);
+            ShowTimedAbilityEffect(owner, new Color(1f, 0.3f, 0.75f, 0.95f), duration, "ИСЦЕЛЕНИЕ", radius, 0.14f, true);
             while (owner != null && Time.unscaledTime < end)
             {
                 ControllerHandler players = ControllerHandler.Instance;
@@ -2538,7 +2937,12 @@ namespace StickFightFortDefense
                             float before = health.health;
                             health.health = Mathf.Min(health.maxHealth, health.health + 2.5f);
                             restored += health.health - before;
-                            if (health.health > before) CreateHealFlash(ally, health.health - before);
+                            if (health.health > before)
+                            {
+                                CreateHealFlash(ally, health.health - before);
+                                // Green blink: the character visibly "takes" the healing.
+                                FlashCharacter(ally, new Color(0.5f, 1f, 0.55f, 1f), 0.65f, 3.5f);
+                            }
                         }
                     }
                 }
@@ -2555,8 +2959,12 @@ namespace StickFightFortDefense
             TextMesh text = label.AddComponent<TextMesh>();
             text.text = "+" + amount.ToString("F0") + " HP";
             text.color = new Color(1f, 0.35f, 0.8f, 1f);
-            text.fontSize = 48;
-            text.characterSize = 0.08f;
+            text.fontSize = 64;
+            text.characterSize = 0.1f;
+            text.fontStyle = FontStyle.Bold;
+            text.anchor = TextAnchor.MiddleCenter;
+            MeshRenderer healRenderer = label.GetComponent<MeshRenderer>();
+            if (healRenderer != null) healRenderer.sortingOrder = 600;
             StartCoroutine(FloatHealText(label));
         }
 
@@ -2578,7 +2986,43 @@ namespace StickFightFortDefense
             if (label != null) Destroy(label);
         }
 
-        private void RootNearbyEnemies(Controller owner, float radius, float duration)
+        private readonly Dictionary<int, List<Rigidbody>> frozenEnemyBodies = new Dictionary<int, List<Rigidbody>>();
+
+        // Roots/ice really hold an enemy in place: every body of its ragdoll becomes
+        // kinematic for the duration. Zeroing velocity alone is undone by the
+        // game's physics movement on the very next step.
+        private void FreezeEnemyBodies(Controller target, int id)
+        {
+            ReleaseEnemyBodies(id);
+            List<Rigidbody> frozen = new List<Rigidbody>();
+            Rigidbody[] bodies = target.GetComponentsInChildren<Rigidbody>();
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                Rigidbody body = bodies[i];
+                if (body == null || body.isKinematic) continue;
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+                body.isKinematic = true;
+                frozen.Add(body);
+            }
+            frozenEnemyBodies[id] = frozen;
+        }
+
+        private void ReleaseEnemyBodies(int id)
+        {
+            List<Rigidbody> frozen;
+            if (!frozenEnemyBodies.TryGetValue(id, out frozen)) return;
+            for (int i = 0; i < frozen.Count; i++)
+            {
+                if (frozen[i] == null) continue;
+                frozen[i].isKinematic = false;
+                frozen[i].velocity = Vector3.zero;
+                frozen[i].angularVelocity = Vector3.zero;
+            }
+            frozenEnemyBodies.Remove(id);
+        }
+
+        private void RootNearbyEnemies(Controller owner, float radius, float duration, bool ice = false)
         {
             AI[] enemies = FindObjectsOfType(typeof(AI)) as AI[];
             int count = 0;
@@ -2589,28 +3033,76 @@ namespace StickFightFortDefense
                     AI enemy = enemies[i];
                     Controller target = enemy == null || System.Object.ReferenceEquals(AIControllerField, null)
                         ? null : AIControllerField.GetValue(enemy) as Controller;
-                    if (target == null || !target.isAI || Vector3.Distance(GetActorPosition(owner), GetActorPosition(target)) > radius)
+                    CharacterInformation info = target == null ? null : target.GetComponent<CharacterInformation>();
+                    if (target == null || !target.isAI || info == null || info.isDead ||
+                        Vector3.Distance(GetActorPosition(owner), GetActorPosition(target)) > radius)
                     {
                         continue;
                     }
-                    EnemyAIPatches.RootedUntil[target.GetInstanceID()] = Time.unscaledTime + duration;
-                    rootedUntil[target.GetInstanceID()] = Time.unscaledTime + duration;
-                    CharacterInformation info = target.GetComponent<CharacterInformation>();
-                    if (info != null && info.mainRig != null)
-                    {
-                        info.mainRig.velocity = Vector3.zero;
-                        info.mainRig.angularVelocity = Vector3.zero;
-                    }
-                    GameObject old = null;
-                    rootVisuals.TryGetValue(target.GetInstanceID(), out old);
-                    if (old != null) Destroy(old);
-                    GameObject roots = CreateEffectRing("FortDefense_Roots", new Color(0.12f, 1f, 0.18f, 1f), 0.75f, 0.16f);
-                    roots.transform.position = GetActorPosition(target);
-                    rootVisuals[target.GetInstanceID()] = roots;
+                    int id = target.GetInstanceID();
+                    float until = Time.unscaledTime + duration;
+                    EnemyAIPatches.RootedUntil[id] = until;
+                    rootedUntil[id] = until;
+                    FreezeEnemyBodies(target, id);
+                    GameObject old;
+                    if (rootVisuals.TryGetValue(id, out old) && old != null) DestroyEffect(old);
+                    StartCoroutine(GrowRoots(target, duration, id, ice));
                     count++;
                 }
             }
-            Logger.LogInfo("Green roots immobilized " + count + " nearby enemies for " + duration.ToString("F0") + " seconds.");
+            Logger.LogInfo((ice ? "Ice grip" : "Green roots") + " immobilized " + count + " nearby enemies for " + duration.ToString("F0") + " seconds.");
+        }
+
+        // Roots visibly grow out of the ground, spiral up the enemy and hold it.
+        private IEnumerator GrowRoots(Controller target, float duration, int id, bool ice)
+        {
+            CharacterInformation info = target == null ? null : target.GetComponent<CharacterInformation>();
+            GameObject holder = new GameObject("FortDefense_Roots");
+            rootVisuals[id] = holder;
+            const int rootCount = 7;
+            const int pointCount = 16;
+            Color baseColor = ice ? new Color(0.45f, 0.8f, 1f, 1f) : new Color(0.10f, 0.42f, 0.08f, 1f);
+            Color tipColor = ice ? new Color(0.92f, 1f, 1f, 1f) : new Color(0.55f, 0.95f, 0.2f, 1f);
+            LineRenderer[] roots = new LineRenderer[rootCount];
+            float[] phases = new float[rootCount];
+            float[] offsets = new float[rootCount];
+            float[] heights = new float[rootCount];
+            for (int i = 0; i < rootCount; i++)
+            {
+                GameObject rootObject = new GameObject("Root");
+                rootObject.transform.SetParent(holder.transform, false);
+                roots[i] = SetupOverlayLine(rootObject, baseColor, tipColor, 0.2f, 0.07f, pointCount, false, true);
+                phases[i] = i * 1.9f;
+                offsets[i] = (i - (rootCount - 1) * 0.5f) * 0.22f;
+                heights[i] = 1.4f + (i % 3) * 0.35f;
+            }
+            float started = Time.unscaledTime;
+            while (holder != null && target != null && info != null && !info.isDead && Time.unscaledTime - started < duration)
+            {
+                float elapsed = Time.unscaledTime - started;
+                float grow = Mathf.Clamp01(elapsed / 0.45f);
+                Vector3 center = GetActorPosition(target);
+                float baseY = center.y - 1.2f;
+                for (int i = 0; i < rootCount; i++)
+                {
+                    for (int p = 0; p < pointCount; p++)
+                    {
+                        float u = (float)p / (float)(pointCount - 1) * grow;
+                        float sway = Mathf.Sin(u * 7f + phases[i] + elapsed * 3f) * (0.28f - u * 0.12f);
+                        float z = center.z + offsets[i] * (1f - u * 0.55f) + sway;
+                        float y = baseY + u * heights[i];
+                        roots[i].SetPosition(p, new Vector3(center.x, y, z));
+                    }
+                    float throb = 1f + Mathf.Sin(elapsed * 10f + phases[i]) * 0.1f;
+                    roots[i].startWidth = 0.2f * throb;
+                    roots[i].endWidth = 0.07f * throb;
+                }
+                yield return null;
+            }
+            GameObject current;
+            bool stillCurrent = rootVisuals.TryGetValue(id, out current) && current == holder;
+            DestroyEffect(holder);
+            if (stillCurrent) rootVisuals.Remove(id);
         }
 
         private void UpdateRootedEffects()
@@ -2622,36 +3114,46 @@ namespace StickFightFortDefense
                 Controller target = FindPlayerByInstanceId(item.Key);
                 CharacterInformation info = target == null ? null : target.GetComponent<CharacterInformation>();
                 if (target == null || info == null || info.isDead || Time.unscaledTime >= item.Value)
-                {
                     expired.Add(item.Key);
-                    continue;
-                }
-                if (info.mainRig != null)
-                {
-                    info.mainRig.velocity = Vector3.zero;
-                    info.mainRig.angularVelocity = Vector3.zero;
-                }
-                GameObject activeRoots;
-                if (rootVisuals.TryGetValue(item.Key, out activeRoots) && activeRoots != null)
-                {
-                    activeRoots.transform.position = GetActorPosition(target);
-                    float pulse = 0.9f + Mathf.Sin(Time.unscaledTime * 14f) * 0.12f;
-                    activeRoots.transform.localScale = Vector3.one * pulse;
-                }
             }
             for (int i = 0; i < expired.Count; i++)
             {
                 int id = expired[i];
                 rootedUntil.Remove(id);
                 EnemyAIPatches.RootedUntil.Remove(id);
+                ReleaseEnemyBodies(id);
                 GameObject visual;
-                if (rootVisuals.TryGetValue(id, out visual) && visual != null) Destroy(visual);
+                if (rootVisuals.TryGetValue(id, out visual) && visual != null) DestroyEffect(visual);
                 rootVisuals.Remove(id);
+            }
+        }
+
+        private static void StunEnemy(Controller target, float seconds)
+        {
+            if (target == null) return;
+            float until;
+            float desired = Time.unscaledTime + seconds;
+            if (EnemyAIPatches.RootedUntil.TryGetValue(target.GetInstanceID(), out until) && until > desired) return;
+            EnemyAIPatches.RootedUntil[target.GetInstanceID()] = desired;
+        }
+
+        // VelocityChange ignores mass, so a ragdoll is shoved as a whole no matter how
+        // heavy its limbs are. A single AddForce on one rigidbody barely moved enemies.
+        private static void ApplyVelocityChange(Controller target, Vector3 delta)
+        {
+            if (target == null) return;
+            Rigidbody[] bodies = target.GetComponentsInChildren<Rigidbody>();
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                if (bodies[i] == null || bodies[i].isKinematic) continue;
+                bodies[i].AddForce(delta, ForceMode.VelocityChange);
             }
         }
 
         private void PushNearbyEnemies(Controller owner, float radius, float force)
         {
+            Vector3 ownerPosition = GetActorPosition(owner);
+            float facing = GetFacingSign(owner);
             AI[] enemies = FindObjectsOfType(typeof(AI)) as AI[];
             int count = 0;
             if (enemies != null)
@@ -2661,18 +3163,16 @@ namespace StickFightFortDefense
                     Controller target = enemies[i] == null || System.Object.ReferenceEquals(AIControllerField, null)
                         ? null : AIControllerField.GetValue(enemies[i]) as Controller;
                     CharacterInformation info = target == null ? null : target.GetComponent<CharacterInformation>();
-                    if (target == null || !target.isAI || info == null || info.isDead ||
-                        Vector3.Distance(GetActorPosition(owner), GetActorPosition(target)) > radius || info.mainRig == null)
-                    {
-                        continue;
-                    }
-                    Vector3 direction = GetActorPosition(target) - GetActorPosition(owner);
-                    direction.y = Mathf.Max(0.35f, direction.y);
-                    info.mainRig.AddForce(direction.normalized * force, ForceMode.Impulse);
+                    if (target == null || !target.isAI || info == null || info.isDead) continue;
+                    Vector3 delta = GetActorPosition(target) - ownerPosition;
+                    if (delta.magnitude > radius) continue;
+                    float side = Mathf.Abs(delta.z) < 0.25f ? facing : Mathf.Sign(delta.z);
+                    float falloff = Mathf.Lerp(1f, 0.55f, Mathf.Clamp01(delta.magnitude / radius));
+                    ApplyVelocityChange(target, new Vector3(0f, 0.55f, side).normalized * (force * falloff));
+                    StunEnemy(target, 0.9f);
                     count++;
                 }
             }
-            Vector3 ownerPosition = GetActorPosition(owner);
             Collider[] nearby = Physics.OverlapSphere(ownerPosition, radius);
             HashSet<int> pushedBodies = new HashSet<int>();
             if (nearby != null)
@@ -2680,82 +3180,123 @@ namespace StickFightFortDefense
                 for (int i = 0; i < nearby.Length; i++)
                 {
                     Rigidbody body = nearby[i] == null ? null : nearby[i].attachedRigidbody;
-                    if (body == null || body.isKinematic || body.transform.IsChildOf(owner.transform) || !pushedBodies.Add(body.GetInstanceID())) continue;
+                    if (body == null || body.isKinematic || !pushedBodies.Add(body.GetInstanceID())) continue;
+                    // Characters were handled above (enemies) or must not be shoved (players).
+                    if (body.GetComponentInParent<Controller>() != null) { pushedBodies.Remove(body.GetInstanceID()); continue; }
                     Vector3 direction = body.worldCenterOfMass - ownerPosition;
-                    if (direction.sqrMagnitude < 0.01f) direction = Vector3.forward;
-                    direction.y = Mathf.Max(0.4f, direction.y);
-                    body.AddForce(direction.normalized * force, ForceMode.Impulse);
+                    float side = Mathf.Abs(direction.z) < 0.25f ? facing : Mathf.Sign(direction.z);
+                    body.AddForce(new Vector3(0f, 0.5f, side).normalized * (force * 0.7f), ForceMode.VelocityChange);
                 }
             }
-            CreateExplosionEffect(ownerPosition, radius, new Color(0.15f, 0.55f, 1f, 0.95f), 0.45f);
+            CreateExplosionEffect(ownerPosition, radius, new Color(0.2f, 0.6f, 1f, 0.95f), 0.5f);
+            FlashCharacter(owner, new Color(0.7f, 0.9f, 1f, 1f), 0.4f, 4f);
             Logger.LogInfo("Blue impulse pushed " + count + " nearby enemies and " + pushedBodies.Count + " physical objects.");
+        }
+
+        private void ActivateAirStep(Controller player, CharacterInformation info)
+        {
+            Rigidbody[] bodies = player.GetComponentsInChildren<Rigidbody>();
+            int moved = 0;
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                Rigidbody body = bodies[i];
+                if (body == null || body.isKinematic) continue;
+                Vector3 velocity = body.velocity;
+                velocity.y = Mathf.Max(velocity.y, 11f);
+                body.velocity = velocity;
+                moved++;
+            }
+            StartCoroutine(AirStepRings(player));
+            FlashCharacter(player, new Color(0.7f, 1f, 1f, 1f), 0.45f, 4f);
+            status = "ВОЗДУШНЫЙ ШАГ — дополнительный прыжок!";
+            statusUntil = Time.unscaledTime + 2f;
+            Logger.LogInfo("Cyan air step lifted " + moved + " rigidbodies of local player " + player.playerID + " to at least 11 up.");
+        }
+
+        private IEnumerator AirStepRings(Controller player)
+        {
+            for (int i = 0; i < 3 && player != null; i++)
+            {
+                Vector3 feet = GetActorPosition(player) + Vector3.down * 0.9f;
+                CreateExplosionEffect(feet, 1.5f, new Color(0.1f, 0.95f, 1f, 0.95f), 0.4f);
+                yield return new WaitForSecondsRealtime(0.1f);
+            }
         }
 
         private IEnumerator DestructionBeam(Controller owner, Vector3 direction)
         {
-            // SPRAY-style single hit: one visible pulse, one damage application per
-            // enemy, then stop at the first solid world collider.
+            // One instant beam shot toward the aim direction. It passes through every
+            // enemy on its path (damaging each once) and ignores ordinary map props:
+            // only colliders whose name contains "wall" stop it.
             if (owner == null) yield break;
-            CharacterInformation ownerInfo = owner.GetComponent<CharacterInformation>();
-            Vector3 origin = ownerInfo != null && ownerInfo.mainRig != null ? ownerInfo.mainRig.position : owner.transform.position;
-            if (direction.sqrMagnitude < 0.5f) direction = FindBeamTargetDirection(owner, origin);
-            const float range = 22f;
+            Vector3 origin = GetActorPosition(owner);
+            direction.x = 0f;
+            if (direction.sqrMagnitude < 0.25f) direction = FindBeamTargetDirection(owner, origin);
+            direction.x = 0f;
+            direction.Normalize();
+            const float range = 24f;
             const float damage = 30f;
-            Vector3 beamEnd = origin + direction * range;
-            int damagedEnemies = 0;
-            // SPRAY is a visibly thick beam, so trace a slim volume rather than a
-            // zero-width ray; stickman limbs otherwise leave gaps in the hit test.
-            const float beamRadius = 0.42f;
-            RaycastHit[] hits = Physics.SphereCastAll(origin, beamRadius, direction, range);
-            Array.Sort(hits, delegate(RaycastHit a, RaycastHit b) { return a.distance.CompareTo(b.distance); });
-            HashSet<int> hitEnemies = new HashSet<int>();
-            for (int i = 0; i < hits.Length; i++)
+            const float beamRadius = 0.5f;
+            float length = range;
+            RaycastHit[] wallHits = Physics.RaycastAll(origin, direction, range);
+            for (int i = 0; i < wallHits.Length; i++)
             {
-                RaycastHit hit = hits[i];
-                if (hit.collider == null || hit.collider.isTrigger) continue;
-                if (hit.collider.transform.IsChildOf(owner.transform)) continue;
-                AI hitAI = hit.collider.GetComponentInParent<AI>();
-                Controller target = hitAI == null || System.Object.ReferenceEquals(AIControllerField, null)
-                    ? hit.collider.GetComponentInParent<Controller>() : AIControllerField.GetValue(hitAI) as Controller;
-                if (target == owner) continue;
-                // Character ragdoll colliders can be detached from the Controller
-                // transform and therefore are not its children. The origin sits
-                // inside the player, so ignore only non-enemy contacts at point blank.
-                if (target == null && hit.distance < 0.75f) continue;
-                if (target != null && target.isAI)
+                RaycastHit wallHit = wallHits[i];
+                if (wallHit.collider == null || wallHit.collider.isTrigger) continue;
+                if (wallHit.collider.GetComponentInParent<Controller>() != null) continue;
+                if (wallHit.collider.name.IndexOf("wall", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                if (wallHit.distance < length)
                 {
-                    if (!hitEnemies.Add(target.GetInstanceID())) continue;
-                    HealthHandler health = target.GetComponent<HealthHandler>();
-                    if (health != null)
-                    {
-                        float before = health.health;
-                        health.TakeDamage(damage, owner, DamageType.LocalDamage, false, hit.point, Vector3.zero);
-                        if (Mathf.Approximately(health.health, before))
-                            health.health = Mathf.Max(0f, before - damage);
-                        if (health.health <= 0f)
-                        {
-                            health.ForcedDie();
-                            if (handler != null) handler.RemoveAI(target);
-                            if (target.GetComponent<RemoveAI>() == null) target.gameObject.AddComponent<RemoveAI>();
-                        }
-                        damagedEnemies++;
-                    }
-                    continue;
+                    length = wallHit.distance;
+                    Logger.LogInfo("Purple beam stopped by wall collider " + wallHit.collider.name + " at " + wallHit.distance.ToString("F1") + ".");
                 }
-                // The first non-enemy solid collider is the wall/terrain stop.
-                beamEnd = hit.point;
-                Logger.LogInfo("Purple SPRAY shot stopped by " + hit.collider.name + " at " + hit.distance.ToString("F1") + ".");
-                break;
+            }
+            Vector3 beamEnd = origin + direction * length;
+            Collider[] overlaps = Physics.OverlapCapsule(origin, beamEnd, beamRadius);
+            HashSet<int> hitEnemies = new HashSet<int>();
+            int damagedEnemies = 0;
+            for (int i = 0; i < overlaps.Length; i++)
+            {
+                Collider collider = overlaps[i];
+                if (collider == null || collider.isTrigger) continue;
+                AI hitAI = collider.GetComponentInParent<AI>();
+                Controller target = hitAI == null || System.Object.ReferenceEquals(AIControllerField, null)
+                    ? null : AIControllerField.GetValue(hitAI) as Controller;
+                if (target == null || !target.isAI || target == owner) continue;
+                if (!hitEnemies.Add(target.GetInstanceID())) continue;
+                CharacterInformation targetInfo = target.GetComponent<CharacterInformation>();
+                HealthHandler health = target.GetComponent<HealthHandler>();
+                if (health == null || (targetInfo != null && targetInfo.isDead)) continue;
+                Vector3 hitPoint = collider.ClosestPointOnBounds(origin);
+                float before = health.health;
+                health.TakeDamage(damage, owner, DamageType.LocalDamage, false, hitPoint, Vector3.zero);
+                if (Mathf.Approximately(health.health, before))
+                    health.health = Mathf.Max(0f, before - damage);
+                if (health.health <= 0f)
+                {
+                    health.ForcedDie();
+                    if (handler != null) handler.RemoveAI(target);
+                    if (target.GetComponent<RemoveAI>() == null) target.gameObject.AddComponent<RemoveAI>();
+                }
+                else
+                {
+                    StunEnemy(target, 0.35f);
+                }
+                CreateExplosionEffect(GetActorPosition(target), 1.3f, new Color(0.85f, 0.35f, 1f, 1f), 0.3f);
+                damagedEnemies++;
             }
 
+            // Visual: the game's own beam/spray material when available, plus a white core.
             GameObject beamObject = new GameObject("FortDefense_PurpleBeam");
             LineRenderer beam = beamObject.AddComponent<LineRenderer>();
             beam.useWorldSpace = true;
             beam.loop = false;
             beam.positionCount = 2;
             EnsureSprayBeamStyle();
-            beam.startWidth = sprayBeamStartWidth;
-            beam.endWidth = sprayBeamEndWidth;
+            float outerStart = Mathf.Max(0.45f, sprayBeamStartWidth * 1.5f);
+            float outerEnd = Mathf.Max(0.25f, sprayBeamEndWidth * 3f);
+            beam.startWidth = outerStart;
+            beam.endWidth = outerEnd;
             beam.startColor = new Color(0.92f, 0.55f, 1f, 1f);
             beam.endColor = new Color(0.58f, 0.04f, 1f, 0.95f);
             beam.textureMode = LineTextureMode.Stretch;
@@ -2764,9 +3305,27 @@ namespace StickFightFortDefense
             beam.sharedMaterial = GetPurpleBeamMaterial();
             beam.SetPosition(0, origin);
             beam.SetPosition(1, beamEnd);
-            Logger.LogInfo("Purple SPRAY shot hit " + damagedEnemies + " enemies; damage=" + damage.ToString("F0") +
-                ", beam length=" + Vector3.Distance(origin, beamEnd).ToString("F1") + ", direction=" + direction.ToString("F2") + ".");
-            yield return new WaitForSecondsRealtime(sprayBeamLifetime);
+            GameObject coreObject = new GameObject("Core");
+            coreObject.transform.SetParent(beamObject.transform, false);
+            LineRenderer core = SetupOverlayLine(coreObject, new Color(1f, 0.92f, 1f, 1f), new Color(1f, 0.8f, 1f, 0.9f), 0.16f, 0.1f, 2, false, true);
+            core.sortingOrder = 520;
+            core.SetPosition(0, origin);
+            core.SetPosition(1, beamEnd);
+            CreateExplosionEffect(origin, 1.1f, new Color(0.85f, 0.4f, 1f, 1f), 0.25f);
+            Logger.LogInfo("Purple beam hit " + damagedEnemies + " enemies; damage=" + damage.ToString("F0") +
+                ", beam length=" + length.ToString("F1") + ", direction=" + direction.ToString("F2") + ".");
+            float lifetime = Mathf.Max(0.35f, sprayBeamLifetime);
+            float started = Time.unscaledTime;
+            while (beamObject != null && Time.unscaledTime - started < lifetime)
+            {
+                float t = (Time.unscaledTime - started) / lifetime;
+                float shrink = 1f - t * 0.7f;
+                beam.startWidth = outerStart * shrink;
+                beam.endWidth = outerEnd * shrink;
+                core.startWidth = 0.16f * shrink;
+                core.endWidth = 0.1f * shrink;
+                yield return null;
+            }
             if (beamObject != null) Destroy(beamObject);
         }
 
@@ -3076,32 +3635,56 @@ namespace StickFightFortDefense
             sprayBeamStyleScanned = true;
             Weapon[] weapons = Resources.FindObjectsOfTypeAll(typeof(Weapon)) as Weapon[];
             if (weapons == null) return;
+            // Prefer the stock BEAM weapon, then any laser, then SPRAY.
+            string[] keywords = new string[] { "beam", "laser", "spray" };
+            List<string> weaponNames = new List<string>();
             for (int i = 0; i < weapons.Length; i++)
+                if (weapons[i] != null && !weaponNames.Contains(weapons[i].name)) weaponNames.Add(weapons[i].name);
+            Logger.LogInfo("Weapon catalog (" + weaponNames.Count + "): " + String.Join(", ", weaponNames.ToArray()) + ".");
+            for (int k = 0; k < keywords.Length; k++)
             {
-                Weapon weapon = weapons[i];
-                if (weapon == null) continue;
-                string objectName = weapon.gameObject == null ? String.Empty : weapon.gameObject.name;
-                if (weapon.name.IndexOf("spray", StringComparison.OrdinalIgnoreCase) < 0 &&
-                    objectName.IndexOf("spray", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                GameObject projectile = weapon.projectile;
-                if (projectile == null) continue;
-                TrailRenderer[] trails = projectile.GetComponentsInChildren<TrailRenderer>(true);
-                for (int j = 0; j < trails.Length; j++)
+                for (int i = 0; i < weapons.Length; i++)
                 {
-                    TrailRenderer trail = trails[j];
-                    if (trail == null || trail.sharedMaterial == null) continue;
-                    sprayBeamSourceMaterial = trail.sharedMaterial;
-                    sprayBeamStartWidth = Mathf.Max(0.05f, trail.startWidth);
-                    sprayBeamEndWidth = Mathf.Max(0.03f, trail.endWidth);
-                    // Keep SPRAY's original trail material and taper, but leave a
-                    // single shot visible long enough to read as a deliberate beam.
-                    sprayBeamLifetime = Mathf.Clamp(trail.time, 0.25f, 0.8f);
-                    Logger.LogInfo("Using SPRAY trail style: material=" + sprayBeamSourceMaterial.name + ", widths=" +
-                        sprayBeamStartWidth.ToString("F2") + "/" + sprayBeamEndWidth.ToString("F2") + ", duration=" +
-                        sprayBeamLifetime.ToString("F2") + ".");
-                    return;
+                    Weapon weapon = weapons[i];
+                    if (weapon == null) continue;
+                    string objectName = weapon.gameObject == null ? String.Empty : weapon.gameObject.name;
+                    if (weapon.name.IndexOf(keywords[k], StringComparison.OrdinalIgnoreCase) < 0 &&
+                        objectName.IndexOf(keywords[k], StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (TryAdoptBeamStyle(weapon.projectile, weapon.name) || TryAdoptBeamStyle(weapon.gameObject, weapon.name)) return;
                 }
             }
+        }
+
+        private bool TryAdoptBeamStyle(GameObject source, string weaponName)
+        {
+            if (source == null) return false;
+            TrailRenderer[] trails = source.GetComponentsInChildren<TrailRenderer>(true);
+            for (int j = 0; j < trails.Length; j++)
+            {
+                TrailRenderer trail = trails[j];
+                if (trail == null || trail.sharedMaterial == null) continue;
+                sprayBeamSourceMaterial = trail.sharedMaterial;
+                sprayBeamStartWidth = Mathf.Max(0.05f, trail.startWidth);
+                sprayBeamEndWidth = Mathf.Max(0.03f, trail.endWidth);
+                sprayBeamLifetime = Mathf.Clamp(trail.time, 0.35f, 0.8f);
+                Logger.LogInfo("Using beam style from weapon " + weaponName + " (trail): material=" + sprayBeamSourceMaterial.name +
+                    ", widths=" + sprayBeamStartWidth.ToString("F2") + "/" + sprayBeamEndWidth.ToString("F2") + ".");
+                return true;
+            }
+            LineRenderer[] lines = source.GetComponentsInChildren<LineRenderer>(true);
+            for (int j = 0; j < lines.Length; j++)
+            {
+                LineRenderer line = lines[j];
+                if (line == null || line.sharedMaterial == null) continue;
+                sprayBeamSourceMaterial = line.sharedMaterial;
+                sprayBeamStartWidth = Mathf.Max(0.05f, line.startWidth);
+                sprayBeamEndWidth = Mathf.Max(0.03f, line.endWidth);
+                sprayBeamLifetime = 0.4f;
+                Logger.LogInfo("Using beam style from weapon " + weaponName + " (line): material=" + sprayBeamSourceMaterial.name +
+                    ", widths=" + sprayBeamStartWidth.ToString("F2") + "/" + sprayBeamEndWidth.ToString("F2") + ".");
+                return true;
+            }
+            return false;
         }
 
         private Texture2D GetPurpleBeamTexture()
@@ -3186,9 +3769,14 @@ namespace StickFightFortDefense
                         }
                     }
                     CharacterInformation targetInfo = target.GetComponent<CharacterInformation>();
-                    if (targetInfo != null && targetInfo.mainRig != null)
+                    if (targetInfo != null && !targetInfo.isDead)
                     {
-                        targetInfo.mainRig.AddForce(direction * force, ForceMode.Impulse);
+                        Vector3 push = direction;
+                        push.x = 0f;
+                        if (push.sqrMagnitude < 0.05f) push = new Vector3(0f, 0f, GetFacingSign(player));
+                        push.y = Mathf.Max(0.45f, push.y);
+                        ApplyVelocityChange(target, push.normalized * 11f);
+                        StunEnemy(target, 0.6f);
                     }
                     Logger.LogInfo("Orange detonation hit enemy " + target.GetInstanceID() + " for " + damage.ToString("F1") + "; remaining health " + health.health.ToString("F1") + ".");
                 }
@@ -3269,8 +3857,42 @@ namespace StickFightFortDefense
             HashSet<int> owned;
             if (CurrentPlugin.selectedPerks.TryGetValue(player.playerID, out owned) && owned != null && owned.Contains(1))
                 multiplier *= 0.85f;
-            if (IsRageActive(player)) multiplier *= 0f;
+            // Red rage halves the time between punches.
+            if (IsRageActive(player)) multiplier *= 0.5f;
             return multiplier;
+        }
+
+        public static bool IsKnockbackImmune(Controller player)
+        {
+            if (CurrentPlugin == null || player == null || player.isAI) return false;
+            float until;
+            return IsRageActive(player) ||
+                (CurrentPlugin.stoneSkinUntil.TryGetValue(player.GetInstanceID(), out until) && Time.unscaledTime < until);
+        }
+
+        // Fallback to the PunchForce mass guard: while rage/stone skin is active no
+        // limb of the player may be flung faster than ordinary running.
+        private void UpdateKnockbackClamp()
+        {
+            if (!modeStarted || (rageUntil.Count == 0 && stoneSkinUntil.Count == 0)) return;
+            ControllerHandler players = ControllerHandler.Instance;
+            if (players == null || players.players == null) return;
+            for (int i = 0; i < players.players.Count; i++)
+            {
+                Controller player = players.players[i];
+                if (player == null || player.isAI || !IsKnockbackImmune(player)) continue;
+                Rigidbody[] bodies = player.GetComponentsInChildren<Rigidbody>();
+                for (int j = 0; j < bodies.Length; j++)
+                {
+                    Rigidbody body = bodies[j];
+                    if (body == null || body.isKinematic) continue;
+                    Vector3 v = body.velocity;
+                    bool changed = false;
+                    if (Mathf.Abs(v.z) > 9f) { v.z = Mathf.Sign(v.z) * 9f; changed = true; }
+                    if (v.y > 14f) { v.y = 14f; changed = true; }
+                    if (changed) body.velocity = v;
+                }
+            }
         }
 
         public static bool IsHunterMarked(Controller target)
@@ -3316,9 +3938,31 @@ namespace StickFightFortDefense
             }
         }
 
+        private void ResetAbilityVisualState()
+        {
+            RestoreAllCharacterFlashes();
+            List<int> frozenIds = new List<int>(frozenEnemyBodies.Keys);
+            for (int i = 0; i < frozenIds.Count; i++) ReleaseEnemyBodies(frozenIds[i]);
+            rootedUntil.Clear();
+            EnemyAIPatches.RootedUntil.Clear();
+            foreach (GameObject visual in rootVisuals.Values) DestroyEffect(visual);
+            rootVisuals.Clear();
+            foreach (GameObject visual in abilityVisuals.Values) DestroyEffect(visual);
+            abilityVisuals.Clear();
+            abilityVisualOwners.Clear();
+            abilityVisualUntil.Clear();
+            abilityVisualBaseWidths.Clear();
+            abilityVisualTitles.Clear();
+            foreach (GameObject shield in shieldObjects.Values) DestroyEffect(shield);
+            shieldObjects.Clear();
+            rageUntil.Clear();
+            stoneSkinUntil.Clear();
+        }
+
         private void StopMode()
         {
             EnemyAIPatches.PurgeTaggedEnemies();
+            ResetAbilityVisualState();
             abilityReadyAt.Clear();
             RestoreLemonMovementSlow();
             lemonGreedUntil = 0f;
@@ -3926,6 +4570,21 @@ namespace StickFightFortDefense
             }
         }
 
+        private string GetPerkSummary(Controller player)
+        {
+            HashSet<int> owned;
+            if (player == null || !selectedPerks.TryGetValue(player.playerID, out owned) || owned == null || owned.Count == 0)
+                return String.Empty;
+            HealthHandler health = player.GetComponent<HealthHandler>();
+            List<string> parts = new List<string>();
+            if (owned.Contains(0) && health != null)
+                parts.Add("HP " + health.health.ToString("F0") + "/" + health.maxHealth.ToString("F0"));
+            if (owned.Contains(1)) parts.Add("атака +18%");
+            if (owned.Contains(2)) parts.Add("урон -10%");
+            if (owned.Contains(3)) parts.Add("медик +15");
+            return parts.Count == 0 ? String.Empty : " [" + String.Join(", ", parts.ToArray()) + "]";
+        }
+
         private string GetAbilityStatusLine()
         {
             ControllerHandler players = ControllerHandler.Instance;
@@ -3949,7 +4608,8 @@ namespace StickFightFortDefense
                     ? Mathf.Max(0f, readyAt - Time.unscaledTime) : 0f;
                 string input = player.playerID == 0 ? "E" : "Up + Block";
                 lines.Add("P" + (player.playerID + 1) + " " + names[Mathf.Clamp(ability, 0, names.Length - 1)] +
-                    " ability: " + (remaining <= 0f ? "READY" : remaining.ToString("F0") + "s") + " (" + input + ")");
+                    " ability: " + (remaining <= 0f ? "READY" : remaining.ToString("F0") + "s") + " (" + input + ")" +
+                    GetPerkSummary(player));
             }
             return lines.Count == 0 ? "Ability: E (keyboard) / Up + Block (controller)" : String.Join(" | ", lines.ToArray());
         }
@@ -4640,7 +5300,92 @@ namespace StickFightFortDefense
                 ? -1f : (float)PunchCooldownField.GetValue(__instance);
         }
 
+        private static Controller FindFightingOwner(Fighting fighting)
+        {
+            if (fighting == null || System.Object.ReferenceEquals(ControllerFightingField, null)) return null;
+            ControllerHandler players = ControllerHandler.Instance;
+            if (players == null || players.players == null) return null;
+            for (int i = 0; i < players.players.Count; i++)
+            {
+                Controller candidate = players.players[i];
+                if (candidate == null || candidate.isAI) continue;
+                if ((ControllerFightingField.GetValue(candidate) as Fighting) == fighting) return candidate;
+            }
+            return null;
+        }
+
+        private static float nextPunchTimerLogAt;
+
+        // Runs after Fighting.Update. punchCD accumulates in real time; giving it extra
+        // time each frame shortens the wait between punches by the requested factor
+        // (rage: x0.5 = twice as fast, Fast Hands perk: x0.85).
+        public static void AcceleratePunchTimer(Fighting __instance)
+        {
+            if (!ModeActive || __instance == null || System.Object.ReferenceEquals(PunchCooldownField, null)) return;
+            Controller owner = FindFightingOwner(__instance);
+            if (owner == null) return;
+            float interval = Plugin.GetPunchCooldownResetMultiplier(owner);
+            if (interval >= 0.999f || interval <= 0.05f) return;
+            float before = (float)PunchCooldownField.GetValue(__instance);
+            float after = before + (1f / interval - 1f) * Time.deltaTime;
+            PunchCooldownField.SetValue(__instance, after);
+            if (Time.unscaledTime >= nextPunchTimerLogAt)
+            {
+                nextPunchTimerLogAt = Time.unscaledTime + 1f;
+                Plugin.LogNavigation("Punch timer boost for player " + (owner.playerID + 1) + ": interval x" +
+                    interval.ToString("F2") + ", punchCD " + before.ToString("F3") + " -> " + after.ToString("F3") + ".");
+            }
+        }
+
+        // Knockback guard: PunchForce pushes the victim with forces. While the victim is
+        // knockback-immune its limbs are made much heavier for the duration of that call.
+        public static void BeginKnockbackGuard(object __instance, object[] __args, out List<KeyValuePair<Rigidbody, float>> __state)
+        {
+            __state = null;
+            if (!ModeActive) return;
+            List<Controller> candidates = new List<Controller>();
+            Component self = __instance as Component;
+            if (self != null) candidates.Add(self.GetComponentInParent<Controller>());
+            if (__args != null)
+            {
+                for (int i = 0; i < __args.Length; i++)
+                {
+                    Collision collision = __args[i] as Collision;
+                    Collider collider = collision != null ? collision.collider : __args[i] as Collider;
+                    if (collider != null) candidates.Add(collider.GetComponentInParent<Controller>());
+                }
+            }
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                Controller victim = candidates[i];
+                if (victim == null || victim.isAI || !Plugin.IsKnockbackImmune(victim)) continue;
+                __state = new List<KeyValuePair<Rigidbody, float>>();
+                Rigidbody[] bodies = victim.GetComponentsInChildren<Rigidbody>();
+                for (int j = 0; j < bodies.Length; j++)
+                {
+                    if (bodies[j] == null || bodies[j].isKinematic) continue;
+                    __state.Add(new KeyValuePair<Rigidbody, float>(bodies[j], bodies[j].mass));
+                    bodies[j].mass = bodies[j].mass * 30f;
+                }
+                return;
+            }
+        }
+
+        public static void EndKnockbackGuard(List<KeyValuePair<Rigidbody, float>> __state)
+        {
+            if (__state == null) return;
+            for (int i = 0; i < __state.Count; i++)
+                if (__state[i].Key != null) __state[i].Key.mass = __state[i].Value;
+        }
+
         public static void ApplyPunchCooldownRate(Fighting __instance, float __state)
+        {
+            // Superseded by AcceleratePunchTimer (the old after-attack scaling did nothing
+            // because the timer is already near zero right after a punch).
+            return;
+        }
+
+        private static void ApplyPunchCooldownRateLegacy(Fighting __instance, float __state)
         {
             if (__instance == null || __state < 0f || System.Object.ReferenceEquals(PunchCooldownField, null) ||
                 System.Object.ReferenceEquals(ControllerFightingField, null)) return;

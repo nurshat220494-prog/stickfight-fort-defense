@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
@@ -10,7 +10,7 @@ using UnityEngine.UI;
 
 namespace StickFightFortDefense
 {
-[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.8.95")]
+[BepInPlugin("local.stickfight.fortdefense", "Fort Defense", "0.8.96")]
     public sealed class Plugin : BaseUnityPlugin
     {
         private const int AbilityColorCount = 19;
@@ -32,6 +32,7 @@ namespace StickFightFortDefense
             "velocity", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo PlayerActionsField = typeof(Controller).GetField("mPlayerActions", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo ControllerFightingField = typeof(Controller).GetField("fighting", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo BodyPartHealthRefField = typeof(BodyPart).GetField("health", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo HealthControllerRefField = typeof(HealthHandler).GetField("controller", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo AbilityUpField = typeof(CharacterActions).GetField("Up", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo AbilityDownField = typeof(CharacterActions).GetField("Down", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
@@ -79,6 +80,7 @@ namespace StickFightFortDefense
         private readonly Dictionary<int, float> abilityVisualUntil = new Dictionary<int, float>();
         private readonly Dictionary<int, float> abilityVisualBaseWidths = new Dictionary<int, float>();
         private readonly Dictionary<int, float> rootedUntil = new Dictionary<int, float>();
+        private readonly Dictionary<int, Controller> rootedControllers = new Dictionary<int, Controller>();
         private readonly Dictionary<int, GameObject> rootVisuals = new Dictionary<int, GameObject>();
         private readonly Dictionary<int, float> stoneSkinUntil = new Dictionary<int, float>();
         private readonly Dictionary<int, float> shadowFormUntil = new Dictionary<int, float>();
@@ -114,11 +116,11 @@ namespace StickFightFortDefense
         private bool previousEventNavigation;
         private Texture2D beamTexture;
         private Material beamMaterial;
-        private Material sprayBeamSourceMaterial;
-        private bool sprayBeamStyleScanned;
-        private float sprayBeamLifetime = 0.18f;
-        private float sprayBeamStartWidth = 0.42f;
-        private float sprayBeamEndWidth = 0.24f;
+        private Material purpleBeamSourceMaterial;
+        private bool purpleBeamStyleScanned;
+        private float purpleBeamLifetime = 0.18f;
+        private float purpleBeamStartWidth = 0.42f;
+        private float purpleBeamEndWidth = 0.24f;
         private Text perkPrompt;
         private RectTransform perkOptionsContainer;
         private string status = "Join at least one player, then press F8 or use the button.";
@@ -424,6 +426,11 @@ namespace StickFightFortDefense
             }
 
             RefreshOverlay();
+        }
+
+        private void FixedUpdate()
+        {
+            EnforceRootedBodyState();
         }
 
         private void OnGUI()
@@ -1501,11 +1508,21 @@ namespace StickFightFortDefense
             return info == null || info.myMaterial == null ? 0 : FindNearestAbilityColor(info.myMaterial.color);
         }
 
+        private static Rigidbody GetActorBody(Controller actor)
+        {
+            if (actor == null) return null;
+            Torso torso = actor.GetComponentInChildren<Torso>();
+            Rigidbody body = torso == null ? null : torso.GetComponent<Rigidbody>();
+            if (body != null) return body;
+            CharacterInformation info = actor.GetComponent<CharacterInformation>();
+            return info == null ? null : info.mainRig;
+        }
+
         private static Vector3 GetActorPosition(Controller actor)
         {
             if (actor == null) return Vector3.zero;
-            CharacterInformation info = actor.GetComponent<CharacterInformation>();
-            return info != null && info.mainRig != null ? info.mainRig.position : actor.transform.position;
+            Rigidbody body = GetActorBody(actor);
+            return body == null ? actor.transform.position : body.position;
         }
 
         private void ActivateSpecificColorAbility(Controller player, CharacterInformation info, int ability)
@@ -1518,7 +1535,7 @@ namespace StickFightFortDefense
             {
                 label = "Red rage";
                 rageUntil[player.GetInstanceID()] = Time.unscaledTime + 5f;
-                Logger.LogInfo("Red rage: punch cooldown reduced by 100% for five seconds; enemy punch knockback suppressed.");
+                Logger.LogInfo("Red rage: punch recovery reduced by 50% for five seconds; enemy punch knockback suppressed.");
                 ShowTimedAbilityEffect(player, new Color(1f, 0.025f, 0.015f, 1f), 5f, "ЯРОСТЬ", 1.7f, 0.3f);
             }
             else if (ability == 1)
@@ -1535,7 +1552,7 @@ namespace StickFightFortDefense
             else if (ability == 3)
             {
                 label = "Purple destruction beam";
-                Vector3 origin = info != null && info.mainRig != null ? info.mainRig.position : player.transform.position;
+                Vector3 origin = GetActorPosition(player);
                 Vector3 aim = FindMouseAimDirection(player, origin);
                 StartCoroutine(DestructionBeam(player, aim));
             }
@@ -1561,14 +1578,15 @@ namespace StickFightFortDefense
             else if (ability == 7)
             {
                 label = "Cyan air step";
-                if (info.mainRig != null)
+                Rigidbody body = GetActorBody(player);
+                if (body != null)
                 {
                     float direction = player.LookRotation.x < 0f ? -1f : 1f;
-                    Vector3 velocity = info.mainRig.velocity;
+                    Vector3 velocity = body.velocity;
                     velocity.y = Mathf.Max(velocity.y, 8f);
                     velocity.z = direction * Mathf.Max(Mathf.Abs(velocity.z), 4f);
-                    info.mainRig.velocity = velocity;
-                    CreateExplosionEffect(info.mainRig.position, 1.8f, new Color(0.1f, 0.9f, 1f, 0.85f), 0.35f);
+                    body.velocity = velocity;
+                    CreateExplosionEffect(body.position, 1.8f, new Color(0.1f, 0.9f, 1f, 0.85f), 0.35f);
                     status = "Голубой воздушный шаг активирован — дополнительный прыжок!";
                     statusUntil = Time.unscaledTime + 2f;
                     Logger.LogInfo("Cyan air step set vertical velocity to " + velocity.y.ToString("F1") + " for local player " + player.playerID + ".");
@@ -2595,12 +2613,8 @@ namespace StickFightFortDefense
                     }
                     EnemyAIPatches.RootedUntil[target.GetInstanceID()] = Time.unscaledTime + duration;
                     rootedUntil[target.GetInstanceID()] = Time.unscaledTime + duration;
-                    CharacterInformation info = target.GetComponent<CharacterInformation>();
-                    if (info != null && info.mainRig != null)
-                    {
-                        info.mainRig.velocity = Vector3.zero;
-                        info.mainRig.angularVelocity = Vector3.zero;
-                    }
+                    rootedControllers[target.GetInstanceID()] = target;
+                    FreezeRootedController(target);
                     GameObject old = null;
                     rootVisuals.TryGetValue(target.GetInstanceID(), out old);
                     if (old != null) Destroy(old);
@@ -2619,18 +2633,17 @@ namespace StickFightFortDefense
             List<int> expired = new List<int>();
             foreach (KeyValuePair<int, float> item in rootedUntil)
             {
-                Controller target = FindPlayerByInstanceId(item.Key);
+                Controller target;
+                if (!rootedControllers.TryGetValue(item.Key, out target) || target == null)
+                    target = FindPlayerByInstanceId(item.Key);
                 CharacterInformation info = target == null ? null : target.GetComponent<CharacterInformation>();
                 if (target == null || info == null || info.isDead || Time.unscaledTime >= item.Value)
                 {
                     expired.Add(item.Key);
                     continue;
                 }
-                if (info.mainRig != null)
-                {
-                    info.mainRig.velocity = Vector3.zero;
-                    info.mainRig.angularVelocity = Vector3.zero;
-                }
+                rootedControllers[item.Key] = target;
+                FreezeRootedController(target);
                 GameObject activeRoots;
                 if (rootVisuals.TryGetValue(item.Key, out activeRoots) && activeRoots != null)
                 {
@@ -2643,10 +2656,35 @@ namespace StickFightFortDefense
             {
                 int id = expired[i];
                 rootedUntil.Remove(id);
+                rootedControllers.Remove(id);
                 EnemyAIPatches.RootedUntil.Remove(id);
                 GameObject visual;
                 if (rootVisuals.TryGetValue(id, out visual) && visual != null) Destroy(visual);
                 rootVisuals.Remove(id);
+            }
+        }
+
+        private void EnforceRootedBodyState()
+        {
+            if (!modeStarted || rootedControllers.Count == 0) return;
+            foreach (KeyValuePair<int, Controller> item in rootedControllers)
+            {
+                float until;
+                if (item.Value != null && rootedUntil.TryGetValue(item.Key, out until) && Time.unscaledTime < until)
+                    FreezeRootedController(item.Value);
+            }
+        }
+
+        private static void FreezeRootedController(Controller target)
+        {
+            if (target == null) return;
+            Rigidbody[] bodies = target.GetComponentsInChildren<Rigidbody>(true);
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                Rigidbody body = bodies[i];
+                if (body == null || body.isKinematic) continue;
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
             }
         }
 
@@ -2661,14 +2699,15 @@ namespace StickFightFortDefense
                     Controller target = enemies[i] == null || System.Object.ReferenceEquals(AIControllerField, null)
                         ? null : AIControllerField.GetValue(enemies[i]) as Controller;
                     CharacterInformation info = target == null ? null : target.GetComponent<CharacterInformation>();
+                    Rigidbody body = GetActorBody(target);
                     if (target == null || !target.isAI || info == null || info.isDead ||
-                        Vector3.Distance(GetActorPosition(owner), GetActorPosition(target)) > radius || info.mainRig == null)
+                        Vector3.Distance(GetActorPosition(owner), GetActorPosition(target)) > radius || body == null)
                     {
                         continue;
                     }
                     Vector3 direction = GetActorPosition(target) - GetActorPosition(owner);
                     direction.y = Mathf.Max(0.35f, direction.y);
-                    info.mainRig.AddForce(direction.normalized * force, ForceMode.Impulse);
+                    body.AddForce(direction.normalized * force, ForceMode.Impulse);
                     count++;
                 }
             }
@@ -2693,18 +2732,16 @@ namespace StickFightFortDefense
 
         private IEnumerator DestructionBeam(Controller owner, Vector3 direction)
         {
-            // SPRAY-style single hit: one visible pulse, one damage application per
-            // enemy, then stop at the first solid world collider.
+            // BEAM-style shot: damage each enemy once, pierce enemies, stop at arena geometry.
             if (owner == null) yield break;
-            CharacterInformation ownerInfo = owner.GetComponent<CharacterInformation>();
-            Vector3 origin = ownerInfo != null && ownerInfo.mainRig != null ? ownerInfo.mainRig.position : owner.transform.position;
+            Vector3 origin = GetActorPosition(owner);
             if (direction.sqrMagnitude < 0.5f) direction = FindBeamTargetDirection(owner, origin);
             const float range = 22f;
             const float damage = 30f;
             Vector3 beamEnd = origin + direction * range;
             int damagedEnemies = 0;
-            // SPRAY is a visibly thick beam, so trace a slim volume rather than a
-            // zero-width ray; stickman limbs otherwise leave gaps in the hit test.
+            // Trace a slim volume rather than a zero-width ray; stickman limbs
+            // otherwise leave gaps in the hit test.
             const float beamRadius = 0.42f;
             RaycastHit[] hits = Physics.SphereCastAll(origin, beamRadius, direction, range);
             Array.Sort(hits, delegate(RaycastHit a, RaycastHit b) { return a.distance.CompareTo(b.distance); });
@@ -2714,9 +2751,7 @@ namespace StickFightFortDefense
                 RaycastHit hit = hits[i];
                 if (hit.collider == null || hit.collider.isTrigger) continue;
                 if (hit.collider.transform.IsChildOf(owner.transform)) continue;
-                AI hitAI = hit.collider.GetComponentInParent<AI>();
-                Controller target = hitAI == null || System.Object.ReferenceEquals(AIControllerField, null)
-                    ? hit.collider.GetComponentInParent<Controller>() : AIControllerField.GetValue(hitAI) as Controller;
+                Controller target = GetControllerFromCollider(hit.collider);
                 if (target == owner) continue;
                 // Character ragdoll colliders can be detached from the Controller
                 // transform and therefore are not its children. The origin sits
@@ -2742,9 +2777,15 @@ namespace StickFightFortDefense
                     }
                     continue;
                 }
+                if (target != null && !target.isAI) continue;
+                Rigidbody attachedBody = hit.collider.attachedRigidbody;
+                if (attachedBody != null && !attachedBody.isKinematic) continue;
                 // The first non-enemy solid collider is the wall/terrain stop.
                 beamEnd = hit.point;
-                Logger.LogInfo("Purple SPRAY shot stopped by " + hit.collider.name + " at " + hit.distance.ToString("F1") + ".");
+                Logger.LogInfo("Purple beam stopped by " + hit.collider.name + " (layer=" +
+                    LayerMask.LayerToName(hit.collider.gameObject.layer) + ", tag=" + hit.collider.tag +
+                    ", body=" + (attachedBody == null ? "none" : attachedBody.name + ", kinematic=" + attachedBody.isKinematic) +
+                    ") at " + hit.distance.ToString("F1") + ".");
                 break;
             }
 
@@ -2753,9 +2794,9 @@ namespace StickFightFortDefense
             beam.useWorldSpace = true;
             beam.loop = false;
             beam.positionCount = 2;
-            EnsureSprayBeamStyle();
-            beam.startWidth = sprayBeamStartWidth;
-            beam.endWidth = sprayBeamEndWidth;
+            EnsureGameBeamStyle();
+            beam.startWidth = purpleBeamStartWidth;
+            beam.endWidth = purpleBeamEndWidth;
             beam.startColor = new Color(0.92f, 0.55f, 1f, 1f);
             beam.endColor = new Color(0.58f, 0.04f, 1f, 0.95f);
             beam.textureMode = LineTextureMode.Stretch;
@@ -2764,10 +2805,26 @@ namespace StickFightFortDefense
             beam.sharedMaterial = GetPurpleBeamMaterial();
             beam.SetPosition(0, origin);
             beam.SetPosition(1, beamEnd);
-            Logger.LogInfo("Purple SPRAY shot hit " + damagedEnemies + " enemies; damage=" + damage.ToString("F0") +
+            Logger.LogInfo("Purple BEAM shot hit " + damagedEnemies + " enemies; damage=" + damage.ToString("F0") +
                 ", beam length=" + Vector3.Distance(origin, beamEnd).ToString("F1") + ", direction=" + direction.ToString("F2") + ".");
-            yield return new WaitForSecondsRealtime(sprayBeamLifetime);
+            yield return new WaitForSecondsRealtime(purpleBeamLifetime);
             if (beamObject != null) Destroy(beamObject);
+        }
+
+        private static Controller GetControllerFromCollider(Collider collider)
+        {
+            if (collider == null) return null;
+            Controller controller = collider.GetComponentInParent<Controller>();
+            if (controller != null) return controller;
+            AI ai = collider.GetComponentInParent<AI>();
+            if (ai != null && !System.Object.ReferenceEquals(AIControllerField, null))
+                controller = AIControllerField.GetValue(ai) as Controller;
+            if (controller != null) return controller;
+            BodyPart part = collider.GetComponentInParent<BodyPart>();
+            HealthHandler health = part == null || System.Object.ReferenceEquals(BodyPartHealthRefField, null)
+                ? null : BodyPartHealthRefField.GetValue(part) as HealthHandler;
+            return health == null || System.Object.ReferenceEquals(HealthControllerRefField, null)
+                ? null : HealthControllerRefField.GetValue(health) as Controller;
         }
 
         private Vector3 FindBeamTargetDirection(Controller owner, Vector3 origin)
@@ -2789,7 +2846,7 @@ namespace StickFightFortDefense
                 {
                     continue;
                 }
-                Vector3 targetPosition = info.mainRig == null ? target.transform.position : info.mainRig.position;
+                Vector3 targetPosition = GetActorPosition(target);
                 Vector3 delta = targetPosition - origin;
                 delta.x = 0f;
                 float distance = Mathf.Sqrt(delta.z * delta.z + delta.y * delta.y);
@@ -2807,10 +2864,11 @@ namespace StickFightFortDefense
                     RaycastHit visibilityHit = visibilityHits[hitIndex];
                     if (visibilityHit.collider == null || visibilityHit.collider.isTrigger ||
                         visibilityHit.collider.transform.IsChildOf(owner.transform)) continue;
-                    AI blockerAI = visibilityHit.collider.GetComponentInParent<AI>();
-                    Controller blocker = blockerAI == null || System.Object.ReferenceEquals(AIControllerField, null)
-                        ? visibilityHit.collider.GetComponentInParent<Controller>() : AIControllerField.GetValue(blockerAI) as Controller;
-                    if (blocker == owner || (blocker == null && visibilityHit.distance < 0.75f)) continue;
+                    Controller blocker = GetControllerFromCollider(visibilityHit.collider);
+                    if (blocker == owner || (blocker != null && !blocker.isAI) ||
+                        (blocker == null && visibilityHit.distance < 0.75f)) continue;
+                    Rigidbody attachedBody = visibilityHit.collider.attachedRigidbody;
+                    if (blocker == null && attachedBody != null && !attachedBody.isKinematic) continue;
                     visible = blocker != null && blocker.isAI;
                     break;
                 }
@@ -2835,7 +2893,7 @@ namespace StickFightFortDefense
                     direction.x = 0f;
                     if (direction.sqrMagnitude > 0.04f)
                     {
-                        Logger.LogInfo("Purple SPRAY aimed at mouse position " + ray.GetPoint(distance).ToString("F2") + ".");
+                        Logger.LogInfo("Purple BEAM aimed at mouse position " + ray.GetPoint(distance).ToString("F2") + ".");
                         return direction.normalized;
                     }
                 }
@@ -2881,7 +2939,7 @@ namespace StickFightFortDefense
             List<Vector3> originalRigPositions = new List<Vector3>();
             List<Rigidbody> rigs = new List<Rigidbody>();
             List<float> originalHealth = new List<float>();
-            Vector3 origin = ownerInfo.mainRig == null ? owner.transform.position : ownerInfo.mainRig.position;
+            Vector3 origin = GetActorPosition(owner);
             Vector3 direction = FindClearestTestBeamDirection(owner, origin);
             int index = 0;
             if (enemies != null)
@@ -3050,11 +3108,11 @@ namespace StickFightFortDefense
         private Material GetPurpleBeamMaterial()
         {
             if (beamMaterial != null) return beamMaterial;
-            EnsureSprayBeamStyle();
-            if (sprayBeamSourceMaterial != null)
+            EnsureGameBeamStyle();
+            if (purpleBeamSourceMaterial != null)
             {
-                beamMaterial = new Material(sprayBeamSourceMaterial);
-                Logger.LogInfo("Purple beam cloned the game's SPRAY trail material: " + sprayBeamSourceMaterial.name + ".");
+                beamMaterial = new Material(purpleBeamSourceMaterial);
+                Logger.LogInfo("Purple beam cloned the game's BEAM material: " + purpleBeamSourceMaterial.name + ".");
             }
             else
             {
@@ -3063,17 +3121,17 @@ namespace StickFightFortDefense
                 if (shader == null) shader = Shader.Find("Unlit/Color");
                 beamMaterial = new Material(shader);
                 beamMaterial.mainTexture = GetPurpleBeamTexture();
-                Logger.LogWarning("SPRAY trail material was unavailable; using the generated beam fallback.");
+                Logger.LogWarning("BEAM material was unavailable; using the generated beam fallback.");
             }
             beamMaterial.color = new Color(0.78f, 0.18f, 1f, 1f);
             beamMaterial.renderQueue = 3000;
             return beamMaterial;
         }
 
-        private void EnsureSprayBeamStyle()
+        private void EnsureGameBeamStyle()
         {
-            if (sprayBeamStyleScanned) return;
-            sprayBeamStyleScanned = true;
+            if (purpleBeamStyleScanned) return;
+            purpleBeamStyleScanned = true;
             Weapon[] weapons = Resources.FindObjectsOfTypeAll(typeof(Weapon)) as Weapon[];
             if (weapons == null) return;
             for (int i = 0; i < weapons.Length; i++)
@@ -3081,8 +3139,8 @@ namespace StickFightFortDefense
                 Weapon weapon = weapons[i];
                 if (weapon == null) continue;
                 string objectName = weapon.gameObject == null ? String.Empty : weapon.gameObject.name;
-                if (weapon.name.IndexOf("spray", StringComparison.OrdinalIgnoreCase) < 0 &&
-                    objectName.IndexOf("spray", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                if (weapon.name.IndexOf("beam", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    objectName.IndexOf("beam", StringComparison.OrdinalIgnoreCase) < 0) continue;
                 GameObject projectile = weapon.projectile;
                 if (projectile == null) continue;
                 TrailRenderer[] trails = projectile.GetComponentsInChildren<TrailRenderer>(true);
@@ -3090,18 +3148,30 @@ namespace StickFightFortDefense
                 {
                     TrailRenderer trail = trails[j];
                     if (trail == null || trail.sharedMaterial == null) continue;
-                    sprayBeamSourceMaterial = trail.sharedMaterial;
-                    sprayBeamStartWidth = Mathf.Max(0.05f, trail.startWidth);
-                    sprayBeamEndWidth = Mathf.Max(0.03f, trail.endWidth);
-                    // Keep SPRAY's original trail material and taper, but leave a
-                    // single shot visible long enough to read as a deliberate beam.
-                    sprayBeamLifetime = Mathf.Clamp(trail.time, 0.25f, 0.8f);
-                    Logger.LogInfo("Using SPRAY trail style: material=" + sprayBeamSourceMaterial.name + ", widths=" +
-                        sprayBeamStartWidth.ToString("F2") + "/" + sprayBeamEndWidth.ToString("F2") + ", duration=" +
-                        sprayBeamLifetime.ToString("F2") + ".");
+                    purpleBeamSourceMaterial = trail.sharedMaterial;
+                    purpleBeamStartWidth = Mathf.Max(0.05f, trail.startWidth);
+                    purpleBeamEndWidth = Mathf.Max(0.03f, trail.endWidth);
+                    // Reuse the stock BEAM trail and taper when the prefab exposes one.
+                    purpleBeamLifetime = Mathf.Clamp(trail.time, 0.25f, 0.8f);
+                    Logger.LogInfo("Using BEAM trail style: material=" + purpleBeamSourceMaterial.name + ", widths=" +
+                        purpleBeamStartWidth.ToString("F2") + "/" + purpleBeamEndWidth.ToString("F2") + ", duration=" +
+                        purpleBeamLifetime.ToString("F2") + ".");
+                    return;
+                }
+                LineRenderer[] lines = projectile.GetComponentsInChildren<LineRenderer>(true);
+                for (int j = 0; j < lines.Length; j++)
+                {
+                    LineRenderer line = lines[j];
+                    if (line == null || line.sharedMaterial == null) continue;
+                    purpleBeamSourceMaterial = line.sharedMaterial;
+                    purpleBeamStartWidth = Mathf.Max(0.05f, line.startWidth);
+                    purpleBeamEndWidth = Mathf.Max(0.03f, line.endWidth);
+                    Logger.LogInfo("Using BEAM line style: material=" + purpleBeamSourceMaterial.name + ", widths=" +
+                        purpleBeamStartWidth.ToString("F2") + "/" + purpleBeamEndWidth.ToString("F2") + ".");
                     return;
                 }
             }
+            Logger.LogWarning("Could not find a BEAM trail or line renderer in loaded weapon prefabs.");
         }
 
         private Texture2D GetPurpleBeamTexture()
@@ -3269,7 +3339,7 @@ namespace StickFightFortDefense
             HashSet<int> owned;
             if (CurrentPlugin.selectedPerks.TryGetValue(player.playerID, out owned) && owned != null && owned.Contains(1))
                 multiplier *= 0.85f;
-            if (IsRageActive(player)) multiplier *= 0f;
+            if (IsRageActive(player)) multiplier *= 0.5f;
             return multiplier;
         }
 
@@ -3320,6 +3390,12 @@ namespace StickFightFortDefense
         {
             EnemyAIPatches.PurgeTaggedEnemies();
             abilityReadyAt.Clear();
+            foreach (GameObject rootVisual in rootVisuals.Values)
+                if (rootVisual != null) Destroy(rootVisual);
+            rootVisuals.Clear();
+            rootedControllers.Clear();
+            rootedUntil.Clear();
+            EnemyAIPatches.RootedUntil.Clear();
             RestoreLemonMovementSlow();
             lemonGreedUntil = 0f;
             List<int> oathIds = new List<int>(rescueOathsByAlly.Keys);
@@ -4622,16 +4698,20 @@ namespace StickFightFortDefense
                 return true;
             }
             Controller controller = AIControllerField.GetValue(__instance) as Controller;
+            return !IsRooted(controller);
+        }
+
+        private static bool IsRooted(Controller controller)
+        {
+            if (!ModeActive || controller == null) return false;
             float until;
-            if (controller != null && RootedUntil.TryGetValue(controller.GetInstanceID(), out until))
+            int id = controller.GetInstanceID();
+            if (RootedUntil.TryGetValue(id, out until))
             {
-                if (Time.unscaledTime < until)
-                {
-                    return false;
-                }
-                RootedUntil.Remove(controller.GetInstanceID());
+                if (Time.unscaledTime < until) return true;
+                RootedUntil.Remove(id);
             }
-            return true;
+            return false;
         }
 
         public static void CapturePunchCooldown(Fighting __instance, out float __state)
@@ -4662,13 +4742,15 @@ namespace StickFightFortDefense
             if (multiplier >= 0.999f) return;
             float after = (float)PunchCooldownField.GetValue(__instance);
             float nativeDecrease = __state - after;
-            // Attack() subtracts a random ~1s from this accumulating timer after a punch.
-            // Scale its remaining negative wait, which directly shortens time to the next punch.
-            if (nativeDecrease < 0.65f) return;
-            float accelerated = after < 0f ? after * multiplier : after;
+            // Attack() subtracts its randomized recovery from this accumulating timer.
+            // Add back the requested fraction: scaling `after` fails when the native
+            // attack has brought the timer exactly to zero.
+            if (nativeDecrease <= 0.001f) return;
+            float accelerated = after + nativeDecrease * (1f - multiplier);
             PunchCooldownField.SetValue(__instance, accelerated);
             Plugin.LogNavigation("Player " + (owner.playerID + 1) + " punch interval step scaled by " +
-                multiplier.ToString("F2") + ": punchCD " + after.ToString("F2") + " -> " + accelerated.ToString("F2") + ".");
+                multiplier.ToString("F2") + ": punchCD " + after.ToString("F2") + " -> " + accelerated.ToString("F2") +
+                " (native recovery " + nativeDecrease.ToString("F2") + ").");
         }
 
         private static void UpdateNavigationRoute(AI ai, Controller controller, Rigidbody player, CharacterInformation playerInfo)
@@ -5109,6 +5191,11 @@ namespace StickFightFortDefense
 
         public static void AfterAIUpdate(AI __instance)
         {
+            if (__instance != null && !System.Object.ReferenceEquals(AIControllerField, null))
+            {
+                Controller controller = AIControllerField.GetValue(__instance) as Controller;
+                if (IsRooted(controller)) return;
+            }
             AttackAtPointBlankRange(__instance);
             TryNavigationJump(__instance);
         }

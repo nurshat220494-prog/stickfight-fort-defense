@@ -13,6 +13,15 @@ An experimental local-co-op PvE mod prototype for **Stick Fight: The Game**. It 
 
 This is not a finished or balanced release. In particular, ability visuals/behavior, enemy navigation, combat damage, and co-op edge cases may be incomplete or broken. See [MODDING_PLAN.md](MODDING_PLAN.md) for intended scope.
 
+## Latest source update: 0.8.96
+
+- Red Rage and Fast Hands now scale the game's actual punch recovery subtraction, instead of multiplying a timer value that may already be zero.
+- Rooted enemies skip both the game's AI update and the mod's post-update attack/jump logic; their dynamic body parts are held still for the effect duration.
+- Ability positions and movement impulses prefer the live torso rigidbody, with the game's main rig as a fallback.
+- The purple shot searches for the stock BEAM trail or line material, passes through enemies and moving props, and stops at static arena geometry.
+
+The 0.8.96 source compiles against the game's .NET 3.5-era references, BepInEx and Unity assemblies. This update has **not** been launched for a live gameplay check yet; BEAM prefab matching and movement/ability behavior still need in-game verification.
+
 ## Requirements
 
 - Stick Fight: The Game (Steam, Windows, 64-bit)

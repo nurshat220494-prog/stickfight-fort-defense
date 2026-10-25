@@ -1,7 +1,7 @@
 ﻿# Stick Fight: Fort Defense modding plan
 
-- Host: `Stick Fight: The Game`, Steam AppID 674940, Unity 5.6.7f1, Mono x64.
-- Reference: `Stick It to the Stickman`, Steam AppID 2085540, Unity 2022.3.4f1, Mono x64.
+- Host: `Stick Fight: The Game`, Steam AppID 674940, `D:\SteamLibrary\steamapps\common\StickFightTheGame`, Unity 5.6.7f1, Mono x64. Scan found no anti-cheat and no loader.
+- Reference: `Stick It to the Stickman`, Steam AppID 2085540, `D:\SteamLibrary\steamapps\common\Stick It to the Stickman`, Unity 2022.3.4f1, Mono x64. Scan found no anti-cheat and no loader.
 - User goal: local co-op PvE mode where players defend a fort against waves.
 - Route: transplant selected gameplay ideas into a BepInEx 5 plugin for Stick Fight. The game installs remain at their Steam paths; this project contains only original plugin code and notes, not game binaries, assets, or decompiled code.
 - Host implementation: Stick Fight already contains `HoardHandler` wave and AI systems. Reuse the configured handler and enemy prefab; add a simple objective with health and a HUD. The reference game's executable/assets are not needed in the runtime loop.

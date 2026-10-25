@@ -7,6 +7,7 @@
     <TargetFrameworkVersion>v3.5</TargetFrameworkVersion>
     <LangVersion>5</LangVersion>
     <OutputPath>bin\</OutputPath>
+    <GameDir Condition=" '$(GameDir)' == '' ">D:\SteamLibrary\steamapps\common\StickFightTheGame</GameDir>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="BepInEx"><HintPath>$(GameDir)\BepInEx\core\BepInEx.dll</HintPath><Private>False</Private></Reference>
